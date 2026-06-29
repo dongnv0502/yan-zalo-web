@@ -10,16 +10,18 @@ export default function LoginPage() {
   const router = useRouter();
   const [status, setStatus] = useState<Status>("idle");
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [loginError, setLoginError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const loadingQRRef = useRef(false);
 
   const loadQRImage = async () => {
+    if (!loadingQRRef.current) return;
     try {
       const res = await fetch("/api/auth/qr");
       if (res.ok) {
         const data = await res.json();
         setQrDataUrl(`data:image/png;base64,${data.image}`);
       } else {
-        // QR not ready yet, retry
         setTimeout(loadQRImage, 800);
       }
     } catch {
@@ -38,6 +40,7 @@ export default function LoginPage() {
         router.replace("/chat");
         return;
       }
+      loadingQRRef.current = true;
       setStatus("qr_generated");
       loadQRImage();
     } catch {
@@ -62,6 +65,7 @@ export default function LoginPage() {
     setQrDataUrl(null);
     try {
       await fetch("/api/auth/regenerate-qr", { method: "POST" });
+      loadingQRRef.current = true;
       setStatus("qr_generated");
       loadQRImage();
     } catch {
@@ -83,6 +87,8 @@ export default function LoginPage() {
           router.replace("/chat");
         } else if (data.status === "error") {
           clearInterval(pollRef.current!);
+          loadingQRRef.current = false;
+          setLoginError(data.error ?? null);
           setStatus("error");
         }
       } catch {
@@ -193,11 +199,16 @@ export default function LoginPage() {
         {status === "error" && (
           <div className="flex flex-col items-center gap-4">
             <AlertTriangle className="w-12 h-12 text-red-500" />
-            <p className="text-red-600 text-sm">
-              Đã xảy ra lỗi. Vui lòng thử lại.
+            <p className="text-red-600 text-sm font-medium">
+              Không thể tạo mã QR
             </p>
+            {loginError && (
+              <p className="text-xs text-gray-500 bg-gray-50 rounded-lg px-3 py-2 text-left w-full break-words">
+                {loginError}
+              </p>
+            )}
             <button
-              onClick={() => setStatus("idle")}
+              onClick={() => { setStatus("idle"); setLoginError(null); }}
               className="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-3 px-6 rounded-xl transition-colors"
             >
               Thử lại

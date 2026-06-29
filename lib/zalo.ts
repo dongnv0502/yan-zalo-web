@@ -73,6 +73,10 @@ export function isLoggedIn(sessionId: string): boolean {
   return getState(sessionId).status === "logged_in";
 }
 
+export function getLoginError(sessionId: string): string | null {
+  return getState(sessionId).error;
+}
+
 export function getQRImageBase64(sessionId: string): string | null {
   return getState(sessionId).qrImageBase64;
 }
@@ -127,16 +131,25 @@ export async function startQRLogin(sessionId: string): Promise<void> {
   const zalo = new Zalo({
     selfListen: true,
     checkUpdate: false,
-    logging: false,
+    logging: true,
   });
 
+  const qrTimeout = new Promise<never>((_, reject) =>
+    setTimeout(
+      () => reject(new Error("QR login timeout: không thể kết nối đến máy chủ Zalo (id.zalo.me)")),
+      30_000
+    )
+  );
+
   // Run login in background — resolves when user scans QR
-  zalo
-    .loginQR({}, (event) => {
+  Promise.race([
+    zalo.loginQR({}, (event) => {
       if (event.type === LoginQRCallbackEventType.QRCodeGenerated) {
         state.qrImageBase64 = event.data.image;
       }
-    })
+    }),
+    qrTimeout,
+  ])
     .then((api: API) => {
       state.api = api;
       state.status = "logged_in";
@@ -145,6 +158,8 @@ export async function startQRLogin(sessionId: string): Promise<void> {
       wireMessageListener(api, sessionId);
     })
     .catch((err: Error) => {
+      const cause = (err as Error & { cause?: unknown }).cause;
+      console.error("[zalo] QR login failed:", err.message, cause ? `\n  cause: ${cause}` : "");
       state.status = "error";
       state.error = err?.message ?? "Unknown error";
     });
