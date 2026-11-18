@@ -4,6 +4,7 @@ import { Readable } from "node:stream";
 
 export const MAX_CHAT_MEDIA_BYTES = 100 * 1024 * 1024;
 const ARCHIVE_TIMEOUT_MS = 60_000;
+const MAX_CDN_REDIRECTS = 3;
 const SIGNATURE_BYTES = 64;
 const ZALO_CDN_DOMAINS = ["z-cdn.cloud", "zadn.vn", "zdn.vn", "zalo-cdn.com"];
 const SAFE_CONTENT_TYPES: Record<string, true> = {
@@ -76,6 +77,24 @@ function parseZaloCdnUrl(sourceUrl: string): URL {
   return url;
 }
 
+async function fetchZaloMedia(url: URL, signal: AbortSignal): Promise<Response> {
+  for (let redirects = 0; ; redirects++) {
+    const response = await fetch(url, { redirect: "manual", cache: "no-store", signal });
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+
+    await response.body?.cancel().catch(() => undefined);
+    const location = response.headers.get("location");
+    if (redirects === MAX_CDN_REDIRECTS || !location || /[\\\s\x00-\x1f]/.test(location)) {
+      throw new Error("Invalid Zalo media redirect");
+    }
+    // Validate the raw authority before URL normalization can strip empty userinfo.
+    const next = location.startsWith("//") ? `https:${location}`
+      : /^[a-z][a-z\d+.-]*:/i.test(location) ? location
+      : new URL(location, url).href;
+    url = parseZaloCdnUrl(next);
+  }
+}
+
 function detectContentType(prefix: Buffer): string | undefined {
   if (prefix[0] === 0xff && prefix[1] === 0xd8 && prefix[2] === 0xff) return "image/jpeg";
   if (prefix.subarray(0, 8).equals(PNG_SIGNATURE)) return "image/png";
@@ -130,7 +149,7 @@ export async function archiveZaloMedia(sourceUrl: string, mediaType: MediaType, 
   let uploadBody: Readable | undefined;
 
   try {
-    const response = await fetch(url, { redirect: "error", cache: "no-store", signal: abortController.signal });
+    const response = await fetchZaloMedia(url, abortController.signal);
     responseBody = response.body;
     if (response.status !== 200 || !responseBody || response.headers.has("content-range")) {
       throw new Error("Unable to download Zalo media");

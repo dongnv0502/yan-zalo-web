@@ -72,6 +72,8 @@ Trên điện thoại, mở tab **Tiện ích** để xem tất cả công cụ.
 
 Next.js lưu tin nhắn theo tài khoản Zalo trong SQLite (`lib/messageStore.ts`). RustFS lưu tệp ảnh và video; trình duyệt tải qua API chat đã xác thực, không truy cập trực tiếp bucket. App lưu tin nhắn nhận được khi đang kết nối và lịch sử nhóm mà Zalo trả về khi mở nhóm; đây không phải công cụ đồng bộ toàn bộ lịch sử Zalo. Nếu tệp nguồn hết hạn hoặc không đọc được, tin nhắn vẫn được lưu.
 
+Nếu video cũ báo “Video không khả dụng”, mở lại nhóm để nhập lại tin nếu Zalo còn trả tin đó trong lịch sử và tệp nguồn vẫn tải được. Với chat cá nhân, nhờ người gửi gửi lại video vì ứng dụng không tự đồng bộ lịch sử chat cá nhân.
+
 Thu hồi chỉ phản ánh sự kiện Zalo mà server đã nhận và xác thực; không suy ra thu hồi từ tin bị thiếu hoặc chỉ dấu chưa xác minh trong lịch sử nhóm. Khi server hoặc listener ngừng, có thể bỏ lỡ sự kiện. Tin cũ thiếu định danh nguồn đáng tin cậy không có thao tác thu hồi. Thu hồi không xóa byte đã tải, đối tượng RustFS hoặc bản sao lưu. Không phục vụ bản sao SQLite cũ như dữ liệu hiện tại nếu chưa áp lại được các dấu thu hồi phát sinh sau thời điểm sao lưu.
 
 ---

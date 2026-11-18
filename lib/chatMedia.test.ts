@@ -58,7 +58,6 @@ describe("archiveZaloMedia", () => {
 
     await archiveZaloMedia(videoUrl, "video", mediaKey);
 
-    expect(fetchMedia).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ redirect: "error" }));
     expect(upload).toHaveBeenCalledWith(expect.objectContaining({
       Bucket: "chat",
       Key: mediaKey,
@@ -90,8 +89,34 @@ describe("archiveZaloMedia", () => {
     expect(upload).not.toHaveBeenCalled();
   });
 
-  it("does not follow redirects outside the allowed CDN", async () => {
-    fetchMedia.mockResolvedValue(new Response(null, { status: 302, headers: { location: "https://attacker.test/file" } }));
+  it("archives an MP4 after the Zalo CDN redirects to another CDN host", async () => {
+    const redirectedUrl = "https://f.zdn.vn/signed-video.mp4?token=fixture";
+    fetchMedia
+      .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: redirectedUrl } }))
+      .mockResolvedValueOnce(new Response(Uint8Array.from(videoBytes), { headers: { "content-type": "video/mp4" } }));
+
+    await archiveZaloMedia(videoUrl, "video", mediaKey);
+
+    expect(fetchMedia.mock.calls.map(([url]) => String(url))).toEqual([videoUrl, redirectedUrl]);
+    expect(upload).toHaveBeenCalledWith(expect.objectContaining({ ContentType: "video/mp4", Body: videoBytes }));
+  });
+
+  it("stops a CDN redirect loop without archiving anything", async () => {
+    fetchMedia.mockResolvedValue(new Response(null, { status: 307, headers: { location: "/signed-video" } }));
+
+    await expect(archiveZaloMedia(videoUrl, "video", mediaKey)).rejects.toThrow();
+
+    expect(fetchMedia).toHaveBeenCalledTimes(4);
+    expect(upload).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "https://attacker.test/file",
+    "//attacker.test/file",
+    "http://f.zdn.vn/file",
+    "https://@f.zdn.vn/file",
+  ])("does not request a disallowed redirect target: %s", async (location) => {
+    fetchMedia.mockResolvedValue(new Response(null, { status: 302, headers: { location } }));
     await expect(archiveZaloMedia(videoUrl, "video", mediaKey)).rejects.toThrow();
     expect(fetchMedia).toHaveBeenCalledOnce();
     expect(upload).not.toHaveBeenCalled();
