@@ -136,6 +136,18 @@ Sử dụng **Vitest** + jsdom. Các API route, hooks và store đều có unit 
 
 CD chỉ cập nhật digest của app trong repo homelab, không đăng nhập máy chủ. Sau khi homelab có vùng lưu trữ mã hóa, RustFS được nghiệm thu với bucket và khóa riêng cho app, và Compose đã trỏ đến image theo digest, đặt secret `HOMELAB_REPO_TOKEN` (quyền `Contents: Read and write` chỉ trên repo homelab) và đặt biến `HOMELAB_DEPLOY_ENABLED=true`. Máy chủ phải có quyền pull package GHCR; không đưa khóa RustFS vào workflow.
 
+### Deploy từ máy local lên homelab
+
+Dùng [script deploy local](scripts/deploy-homelab.sh) để không phải chờ GitHub Actions hoặc cron. GitOps vẫn là nguồn cấu hình production; script chỉ cập nhật digest của YAN Zalo Web, không dùng `compose.yaml` dành cho môi trường local.
+
+Cần Docker Buildx hỗ trợ `linux/amd64`, `jq`, `gh` đã đăng nhập với quyền ghi repo homelab, Docker đã đăng nhập GHCR với quyền push package, và SSH key vào homelab. Máy chủ phải có quyền pull image GHCR. Không bật đồng thời `HOMELAB_DEPLOY_ENABLED=true` nếu muốn script là đường deploy duy nhất: CD có thể ghi đè digest sau đó.
+
+```bash
+HOMELAB_SSH_TARGET='homelab@<host-tailscale>' bash scripts/deploy-homelab.sh --deploy
+```
+
+Thay `homelab@<host-tailscale>` bằng đích SSH thực tế hoặc alias SSH đã cấu hình. Script build commit `HEAD`, kể cả commit chưa push; thay đổi chưa commit không được deploy. Khi cần rollback, revert commit cập nhật digest trong repo homelab; không xóa dữ liệu. Nếu bước SSH thất bại sau khi đã cập nhật GitOps, cron vẫn có thể áp dụng digest đó.
+
 ---
 
 ## 🔧 Tech Stack

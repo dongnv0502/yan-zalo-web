@@ -5,14 +5,14 @@ import type { ChatMessage, Conversation } from "@/types/chat";
 import ChatPage from "./page";
 
 const { socketHandlers, router } = vi.hoisted(() => ({
-  socketHandlers: new Map<string, (payload: ChatMessage, options?: { mediaUpdate: boolean }) => void>(),
+  socketHandlers: new Map<string, (payload: ChatMessage, options?: { mediaUpdate: boolean } | null) => void>(),
   router: { replace: vi.fn() },
 }));
 
 vi.mock("next/navigation", () => ({ useRouter: () => router }));
 vi.mock("socket.io-client", () => ({
   io: () => ({
-    on: (event: string, listener: (payload: ChatMessage, options?: { mediaUpdate: boolean }) => void) => socketHandlers.set(event, listener),
+    on: (event: string, listener: (payload: ChatMessage, options?: { mediaUpdate: boolean } | null) => void) => socketHandlers.set(event, listener),
     off: (event: string) => socketHandlers.delete(event),
     disconnect: vi.fn(),
     connect: () => socketHandlers.get("connect")?.({} as ChatMessage),
@@ -48,7 +48,7 @@ function mockChatApi(overrides: Record<string, () => Response | Promise<Response
   return request;
 }
 
-async function emitMessage(payload: ChatMessage, options?: { mediaUpdate: boolean }) {
+async function emitMessage(payload: ChatMessage, options?: { mediaUpdate: boolean } | null) {
   await act(async () => socketHandlers.get("message")?.(payload, options));
 }
 
@@ -323,6 +323,20 @@ describe("chat message media", () => {
     expect(screen.getAllByText("Hình ảnh không khả dụng")).toHaveLength(2);
     expect(screen.getAllByText("Video không khả dụng")).toHaveLength(2);
     expect(screen.getByText("Ảnh từ chuyến đi")).toBeDefined();
+  });
+
+  it("shows incoming text in the open conversation without reloading the transcript", async () => {
+    const transcriptUrl = `/api/chat/messages?threadId=${direct.id}&threadType=User`;
+    const request = mockChatApi({ [transcriptUrl]: () => Response.json({ messages: [] }) });
+    render(<ChatPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "An" }));
+    await screen.findByRole("textbox", { name: "Nội dung tin nhắn" });
+
+    // Socket.io encodes an explicit undefined argument as null on the wire.
+    await emitMessage(message({ content: "Tin chữ vừa đến" }), null);
+
+    expect(within(screen.getByRole("main")).getByText("Tin chữ vừa đến")).toBeTruthy();
+    expect(request.mock.calls.filter(([url]) => url === transcriptUrl)).toHaveLength(1);
   });
 
   it("merges group history with live and archived messages without letting a stale thread overwrite it", async () => {

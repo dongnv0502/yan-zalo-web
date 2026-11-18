@@ -346,7 +346,9 @@ function AuthenticatedChat() {
       }
     };
 
-    const onMessage = (message: ChatMessage, { mediaUpdate = false, mergedId }: { mediaUpdate?: boolean; mergedId?: string } = {}) => {
+    const onMessage = (message: ChatMessage, options?: { mediaUpdate?: boolean; mergedId?: string } | null) => {
+      const mediaUpdate = options?.mediaUpdate ?? false;
+      const mergedId = options?.mergedId;
       if (mergedId) mergedIds.current.set(messageKey(message.threadId, message.threadType, mergedId), message.id);
       else if (mergedIds.current.has(messageKey(message.threadId, message.threadType, message.id))) return;
       if (message.recalled) onRecall({ threadId: message.threadId, threadType: message.threadType, messageId: message.id });

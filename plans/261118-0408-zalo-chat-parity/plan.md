@@ -75,6 +75,8 @@ Không có kế hoạch khác chặn. Ba pha chạy tuần tự vì dùng chung 
 - Triển khai: pha 1 đã qua Vitest và browser `/chat` với SQLite tổng hợp, gồm nhảy tới tin ngoài 200 tin mới nhất, đổi hội thoại lúc tìm và nhận tin mới khi đọc cửa sổ cũ. p95 SQLite in-memory, 10.000 tin: 14,96 ms với kết quả cũ nhất và 14,11 ms khi không khớp.
 - Fixture pha 2–3 xác minh nháp khi gửi lỗi, focus trên màn hình 390 × 844, cập nhật thu hồi không để lại đoạn trích; Vitest kiểm tra reconnect, SQLite mở lại và chặn media đến muộn. `npm run build` hoàn tất; môi trường không có ESLint.
 - Pha 2 và 3 **chưa nghiệm thu live**: giữ `ZALO_CHAT_REPLY_VERIFIED` và `ZALO_CHAT_RECALL_VERIFIED` tắt. SDK chỉ phân loại undo ở listener; không có fixture đã xác minh cho undo trong lịch sử nhóm, nên cách ly hàng nghi vấn thay vì ghi tombstone dựa trên phỏng đoán. Không dùng tài khoản thật, không deploy, không tạo commit hay PR.
+- Hồi quy nhận tin chữ: [test `/chat`](../../app/chat/page.test.tsx) tái hiện lỗi khi Socket.io chuyển đối số tùy chọn `undefined` thành `null`. Sau bản sửa, Chrome với Socket.io thật và dữ liệu tổng hợp hiển thị cả tin chữ lẫn cập nhật ảnh trong hội thoại đang mở mà không gọi lại API lịch sử.
+- Hồi quy nhận video: [test lưu media](../../lib/chatMedia.test.ts) tái hiện lỗi khi URL tải chuyển hướng trong CDN Zalo và kiểm tra chặn đích ngoài danh sách. Chrome phát và tua được MP4 qua API media và RustFS cục bộ với fixture; chưa xác minh video lỗi trên môi trường thật.
 
 ## Red Team Review
 
