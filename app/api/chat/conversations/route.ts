@@ -14,6 +14,7 @@ export async function GET(req: NextRequest) {
   if (!api) {
     return NextResponse.json({ error: "API not ready" }, { status: 503 });
   }
+  const accountId = api.getOwnId();
 
   // Fetch friends list
   let friends: Array<{
@@ -35,12 +36,13 @@ export async function GET(req: NextRequest) {
 
     // Seed conversations with friends so they show up in sidebar
     for (const f of friends) {
+      if (!f.userId) continue;
       upsertConversation({
         id: f.userId,
         type: "User",
         name: f.displayName,
         avatar: f.avatar,
-      }, sid);
+      }, accountId);
     }
   } catch (err) {
     console.error("[chat/conversations] getAllFriends error:", err);
@@ -61,13 +63,13 @@ export async function GET(req: NextRequest) {
           name: (info as any).name ?? groupId,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           avatar: (info as any).avatar ?? (info as any).avt ?? "",
-        }, sid);
+        }, accountId);
       }
     }
   } catch (err) {
     console.error("[chat/conversations] getAllGroups error:", err);
   }
 
-  const conversations = getConversations(sid);
-  return NextResponse.json({ conversations, friends });
+  const conversations = getConversations(accountId);
+  return NextResponse.json({ conversations, friends }, { headers: { "Cache-Control": "private, no-store" } });
 }

@@ -12,6 +12,7 @@
 - Xem danh sách hội thoại (bạn bè & nhóm) theo thời gian thực qua Socket.io
 - Gửi tin nhắn văn bản, emoji, sticker
 - **Đính kèm file** — chọn file, xem preview, gửi kèm văn bản hoặc gửi riêng
+- **Ảnh và video trong chat** — xem ảnh và phát video ngay trong hội thoại; ảnh/video được lưu riêng tư trong RustFS.
 - **Thả reaction** — rê chuột vào tin nhắn → thanh emoji xuất hiện → reaction hiển thị real-time
 - **Chuyển tiếp tin nhắn** đến bất kỳ hội thoại nào
 - **Tạo bình chọn** (cho nhóm) với nhiều lựa chọn, ẩn danh, chọn nhiều đáp án
@@ -30,7 +31,7 @@
 
 ### 🔐 Xác thực
 - Đăng nhập bằng QR code (quét bằng Zalo trên điện thoại)
-- Session được lưu cục bộ — khởi động lại app không cần quét lại QR
+- Trình duyệt giữ phiên Zalo để có thể khôi phục sau khi khởi động lại app.
 
 ---
 
@@ -63,14 +64,28 @@
               └────────────────┘
 ```
 
-**Không có database hay backend riêng.** Dữ liệu tin nhắn được lưu tạm trong bộ nhớ (`lib/messageStore.ts`) và session Zalo được lưu vào `data/session.json`.
+Next.js lưu tin nhắn theo tài khoản Zalo trong SQLite (`lib/messageStore.ts`). RustFS lưu tệp ảnh và video; trình duyệt tải qua API chat đã xác thực, không truy cập trực tiếp bucket. App lưu tin nhắn nhận được khi đang kết nối và lịch sử nhóm mà Zalo trả về khi mở nhóm; đây không phải công cụ đồng bộ toàn bộ lịch sử Zalo. Nếu tệp nguồn hết hạn hoặc không đọc được, tin nhắn vẫn được lưu.
 
 ---
 
 ## 🚀 Cài đặt & chạy
 
-### Yêu cầu
-- Node.js 20+
+### Chạy bằng Docker Compose
+
+```bash
+export RUSTFS_ACCESS_KEY_ID="$(openssl rand -hex 12)"
+export RUSTFS_SECRET_ACCESS_KEY="$(openssl rand -hex 32)"
+docker compose up -d --build --wait
+```
+
+Mở [http://localhost:3000](http://localhost:3000). Có thể đặt `YAN_ZALO_PORT` nếu cổng 3000 đang bận. Lưu hai biến RustFS vào `.env` (đã loại khỏi Git) hoặc trình quản lý bí mật để dùng lại; không tạo khóa mới mỗi lần chạy.
+
+Compose tự tạo bucket riêng tư và không mở cổng RustFS ra máy chủ. Sao lưu cả volume `chat-data` (SQLite) và `media-data` (RustFS); không dùng `docker compose down -v` nếu cần giữ lịch sử.
+
+### Chạy trực tiếp
+
+Yêu cầu:
+- Node.js 24+
 - npm
 
 ### Các bước
@@ -83,11 +98,13 @@ cd yan-zalo-web
 # 2. Cài dependencies
 npm install
 
-# 3. Chạy development server
+# 3. Cấu hình RustFS trong .env.local rồi chạy server
 npm run dev
 ```
 
 Mở [http://localhost:3000](http://localhost:3000) → đăng nhập bằng QR code Zalo.
+
+Khi chạy trực tiếp, tạo sẵn bucket riêng tư rồi đặt `RUSTFS_ENDPOINT`, `RUSTFS_BUCKET`, `RUSTFS_ACCESS_KEY_ID` và `RUSTFS_SECRET_ACCESS_KEY`. `RUSTFS_REGION` mặc định là `us-east-1`. Đặt `CHAT_DB_PATH` nếu muốn dùng đường dẫn khác `data/chat.sqlite`.
 
 ---
 
@@ -98,6 +115,12 @@ npm test
 ```
 
 Sử dụng **Vitest** + jsdom. Các API route, hooks và store đều có unit test.
+
+## CI/CD
+
+[GitHub Actions](.github/workflows/ci-cd.yml) chạy test và kiểm tra container cho pull request. Trên `main`, CI xanh mới publish image `ghcr.io/dongnv0502/yan-zalo-web` cho `linux/amd64` và `linux/arm64`, gắn tag theo commit.
+
+CD chỉ cập nhật digest của app trong repo homelab, không đăng nhập máy chủ. Sau khi homelab có vùng lưu trữ mã hóa, RustFS được nghiệm thu với bucket và khóa riêng cho app, và Compose đã trỏ đến image theo digest, đặt secret `HOMELAB_REPO_TOKEN` (quyền `Contents: Read and write` chỉ trên repo homelab) và đặt biến `HOMELAB_DEPLOY_ENABLED=true`. Máy chủ phải có quyền pull package GHCR; không đưa khóa RustFS vào workflow.
 
 ---
 

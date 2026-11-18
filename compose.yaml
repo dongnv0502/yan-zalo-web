@@ -1,0 +1,55 @@
+services:
+  app:
+    image: yan-zalo-web:local
+    build: .
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${YAN_ZALO_PORT:-3000}:3000"
+    environment:
+      RUSTFS_ENDPOINT: http://rustfs:9000
+      RUSTFS_BUCKET: yan-zalo-media
+      RUSTFS_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY_ID:?Set RUSTFS_ACCESS_KEY_ID}
+      RUSTFS_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_ACCESS_KEY:?Set RUSTFS_SECRET_ACCESS_KEY}
+    volumes:
+      - chat-data:/app/data
+    depends_on:
+      rustfs-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/auth/status').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rustfs-init:
+    image: yan-zalo-web:local
+    pull_policy: never
+    entrypoint: ["node", "docker/init-bucket.mjs"]
+    environment:
+      RUSTFS_ENDPOINT: http://rustfs:9000
+      RUSTFS_BUCKET: yan-zalo-media
+      RUSTFS_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY_ID:?Set RUSTFS_ACCESS_KEY_ID}
+      RUSTFS_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_ACCESS_KEY:?Set RUSTFS_SECRET_ACCESS_KEY}
+    depends_on:
+      rustfs:
+        condition: service_healthy
+
+  rustfs:
+    image: rustfs/rustfs@sha256:ee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY_ID:?Set RUSTFS_ACCESS_KEY_ID}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_ACCESS_KEY:?Set RUSTFS_SECRET_ACCESS_KEY}
+      RUSTFS_CONSOLE_ENABLE: "false"
+    volumes:
+      - media-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  chat-data:
+  media-data:

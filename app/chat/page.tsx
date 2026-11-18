@@ -1,11 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { io, Socket } from "socket.io-client";
-import { Smile, MessageSquare, BookMarked, Plus, Paperclip, Forward, BarChart2 } from "lucide-react";
-import type { ChatMessage, Conversation, MessageReaction } from "@/lib/messageStore";
-import type { StickerDetail, Tab, PickerTab } from "@/types/chat";
+import { io } from "socket.io-client";
+import { Smile, MessageSquare, BookMarked, Plus, Paperclip, Forward, BarChart2, ArrowLeft, ImageOff, VideoOff } from "lucide-react";
+import type { ChatMessage, Conversation, StickerDetail, Tab, PickerTab, ThreadType } from "@/types/chat";
 import { useQuickMessages } from "@/lib/useQuickMessages";
 import { REACTION_ICONS, REACTION_SHORTCODES } from "@/lib/reactionIcons";
 
@@ -16,16 +16,158 @@ const EMOJI_GROUPS = [
   "🎵","🍕","🎮","🏆","🚀","🌸","🌈","⚡","💎","🎯",
 ];
 
-let socket: Socket | null = null;
+const ARCHIVED_MEDIA_PATH = /^\/api\/chat\/media\/[a-f0-9]{64}$/;
 
-function getSocket(): Socket {
-  if (!socket) {
-    socket = io({ path: "/api/socketio", transports: ["websocket", "polling"] });
+function ArchivedMedia({ mediaType, mediaUrl, content }: Pick<ChatMessage, "mediaType" | "mediaUrl" | "content">) {
+  const [failedUrl, setFailedUrl] = useState<string>();
+  const isVideo = mediaType === "video";
+  const label = isVideo ? "Video" : "Hình ảnh";
+  const UnavailableIcon = isVideo ? VideoOff : ImageOff;
+  const caption = /^\[(ảnh|video)\]$/i.test(content.trim()) ? "" : content;
+  const src = mediaUrl && mediaUrl !== failedUrl && ARCHIVED_MEDIA_PATH.test(mediaUrl) ? mediaUrl : undefined;
+
+  return (
+    <figure className="w-80 max-w-full">
+      {src ? (
+        isVideo ? (
+          <video
+            src={src}
+            aria-label={label}
+            className="block w-full max-h-80 rounded-lg bg-black"
+            controls
+            playsInline
+            preload="metadata"
+            onError={() => setFailedUrl(src)}
+          />
+        ) : (
+          <Image
+            src={src}
+            alt={label}
+            width={320}
+            height={240}
+            unoptimized
+            className="block w-full h-auto max-h-80 rounded-lg bg-black/5 object-contain"
+            onError={() => setFailedUrl(src)}
+          />
+        )
+      ) : (
+        <p className="flex min-h-20 items-center justify-center gap-2 rounded-lg bg-black/5 p-3 text-sm">
+          <UnavailableIcon className="w-4 h-4 shrink-0" aria-hidden="true" />
+          {label} không khả dụng
+        </p>
+      )}
+      {caption && <figcaption className="mt-2 whitespace-pre-wrap break-words">{caption}</figcaption>}
+    </figure>
+  );
+}
+
+function conversationKey(threadId: string, threadType: ThreadType): string {
+  return `${threadType}:${threadId}`;
+}
+
+function isConversation(conversation: Conversation | null, threadId: string, threadType: ThreadType): boolean {
+  return conversation?.id === threadId && conversation.type === threadType;
+}
+
+function addReaction(message: ChatMessage, icon: string, senderId: string, senderName: string): ChatMessage {
+  const reactions = message.reactions ?? [];
+  const existing = reactions.find((reaction) => reaction.icon === icon);
+  if (existing?.senderIds.includes(senderId)) return message;
+
+  return {
+    ...message,
+    reactions: existing
+      ? reactions.map((reaction) => reaction === existing ? {
+          ...reaction,
+          senderIds: [...reaction.senderIds, senderId],
+          senderNames: [...reaction.senderNames, senderName],
+        } : reaction)
+      : [...reactions, { icon, senderIds: [senderId], senderNames: [senderName] }],
+  };
+}
+
+function mergeMessage(fallback: ChatMessage, preferred: ChatMessage): ChatMessage {
+  let merged: ChatMessage = {
+    ...preferred,
+    mediaType: preferred.mediaType ?? fallback.mediaType,
+    mediaUrl: preferred.mediaUrl ?? fallback.mediaUrl,
+    cliMsgId: preferred.cliMsgId ?? fallback.cliMsgId,
+    reactions: preferred.reactions ?? fallback.reactions,
+  };
+  if (preferred.reactions) {
+    for (const reaction of fallback.reactions ?? []) {
+      reaction.senderIds.forEach((senderId, index) => {
+        merged = addReaction(merged, reaction.icon, senderId, reaction.senderNames[index]);
+      });
+    }
   }
-  return socket;
+  return merged;
+}
+
+function mergeThreadMessages(current: ChatMessage[], incoming: ChatMessage[], history = false): ChatMessage[] {
+  const byId = new Map(current.map((message) => [message.id, message]));
+  for (const message of incoming) {
+    const existing = byId.get(message.id);
+    byId.set(message.id, existing
+      ? history ? mergeMessage(message, existing) : mergeMessage(existing, message)
+      : message);
+  }
+  return Array.from(byId.values()).sort((left, right) => left.ts - right.ts);
 }
 
 export default function ChatPage() {
+  const router = useRouter();
+  const [authenticated, setAuthenticated] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const { signal } = controller;
+
+    const checkAuth = async () => {
+      try {
+        const response = await fetch("/api/auth/status", { signal });
+        const data = await response.json();
+        if (signal.aborted) return;
+        if (response.ok && data.status === "logged_in") {
+          setAuthenticated(true);
+          return;
+        }
+
+        const storedSession = localStorage.getItem("zalo_session");
+        if (storedSession) {
+          const restored = await fetch("/api/auth/restore", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: storedSession,
+            signal,
+          });
+          const restoredData = await restored.json();
+          if (signal.aborted) return;
+          if (restored.ok && restoredData.status === "logged_in") {
+            setAuthenticated(true);
+            return;
+          }
+          localStorage.removeItem("zalo_session");
+        }
+      } catch (error) {
+        if (signal.aborted) return;
+        console.error("Không thể kiểm tra phiên Zalo:", error);
+      }
+      router.replace("/login");
+    };
+
+    void checkAuth();
+    return () => controller.abort();
+  }, [router]);
+
+  return authenticated ? <AuthenticatedChat /> : (
+    <div role="status" className="grid min-h-dvh place-items-center bg-gray-50 text-sm text-gray-600">
+      Đang kiểm tra phiên đăng nhập…
+    </div>
+  );
+}
+
+function AuthenticatedChat() {
   const router = useRouter();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [active, setActive] = useState<Conversation | null>(null);
@@ -43,11 +185,8 @@ export default function ChatPage() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const templatePanelRef = useRef<HTMLDivElement>(null);
-  // Always holds the latest active conversation without causing listener re-registration
+  // Updated on selection so a socket or request cannot observe the previous thread between renders.
   const activeRef = useRef<Conversation | null>(null);
-  useEffect(() => {
-    activeRef.current = active;
-  }, [active]);
 
   const [templateOpen, setTemplateOpen] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
@@ -77,186 +216,167 @@ export default function ChatPage() {
   const [pollAnonymous, setPollAnonymous] = useState(false);
   const [pollCreating, setPollCreating] = useState(false);
 
-  // Auth guard
   useEffect(() => {
-    const checkAuth = async () => {
+    const controller = new AbortController();
+    const { signal } = controller;
+    const sock = io({ path: "/api/socketio", transports: ["websocket", "polling"] });
+    const seenMessageKeys = new Set<string>();
+
+    const loadConversations = async () => {
       try {
-        const res = await fetch("/api/auth/status");
-        const d = await res.json();
-        if (d.status === "logged_in") return;
-        const stored = localStorage.getItem("zalo_session");
-        if (stored) {
-          const restoreRes = await fetch("/api/auth/restore", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: stored,
-          });
-          const restoreData = await restoreRes.json();
-          if (restoreData.status === "logged_in") return;
-          localStorage.removeItem("zalo_session");
-        }
-        router.replace("/login");
-      } catch {
-        router.replace("/login");
+        const response = await fetch("/api/chat/conversations", { signal });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        if (signal.aborted || !Array.isArray(data.conversations)) return;
+        const snapshot: Conversation[] = data.conversations;
+        const selected = activeRef.current;
+
+        // Keep messages that arrived while the initial conversation list was loading.
+        setConversations((current) => {
+          const byThread = new Map(current.map((conversation) => [conversationKey(conversation.id, conversation.type), conversation]));
+          for (const conversation of snapshot) {
+            const key = conversationKey(conversation.id, conversation.type);
+            const live = byThread.get(key);
+            const archivedMessage = conversation.lastMessage;
+            const liveMessage = live?.lastMessage;
+            const lastMessage = archivedMessage && liveMessage?.id === archivedMessage.id
+              ? mergeMessage(liveMessage, archivedMessage)
+              : liveMessage && liveMessage.ts >= (archivedMessage?.ts ?? 0) ? liveMessage : archivedMessage;
+            byThread.set(key, {
+              ...conversation,
+              lastMessage,
+              unread: isConversation(selected, conversation.id, conversation.type) ? 0 : Math.max(conversation.unread, live?.unread ?? 0),
+            });
+          }
+          return Array.from(byThread.values()).sort((left, right) => (right.lastMessage?.ts ?? 0) - (left.lastMessage?.ts ?? 0));
+        });
+      } catch (error) {
+        if (!signal.aborted) console.error("Không thể tải cuộc trò chuyện:", error);
       }
     };
-    checkAuth();
-  }, [router]);
 
-  // Load conversations
-  const loadConversations = useCallback(async () => {
-    try {
-      const res = await fetch("/api/chat/conversations");
-      const data = await res.json();
-      if (data.conversations) setConversations(data.conversations);
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  useEffect(() => {
-    loadConversations();
-  }, [loadConversations]);
-
-  // Load messages for active thread
-  const loadMessages = useCallback(async (threadId: string) => {
-    try {
-      const res = await fetch(
-        `/api/chat/messages?threadId=${encodeURIComponent(threadId)}`
-      );
-      const data = await res.json();
-      if (data.messages) setMessages(data.messages);
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  const loadGroupHistory = useCallback(async (groupId: string) => {
-    try {
-      const res = await fetch(
-        `/api/chat/history?groupId=${encodeURIComponent(groupId)}&count=50`
-      );
-      const data = await res.json();
-      if (data.messages && Array.isArray(data.messages)) {
-        // Merge: history first, then deduplicate with any already-stored messages
-        setMessages((prev) => {
-          const prevIds = new Set(prev.map((m) => m.id));
-          const fresh = (data.messages as ChatMessage[]).filter((m) => !prevIds.has(m.id));
-          return [...fresh, ...prev].sort((a, b) => a.ts - b.ts);
-        });
+    const onMessage = (message: ChatMessage, { mediaUpdate = false } = {}) => {
+      const threadIsActive = isConversation(activeRef.current, message.threadId, message.threadType);
+      const messageKey = JSON.stringify([message.threadType, message.threadId, message.id]);
+      const seen = seenMessageKeys.has(messageKey);
+      if (!seen && !mediaUpdate) {
+        seenMessageKeys.add(messageKey);
+        // Bound replay bookkeeping to recent events during this chat session.
+        if (seenMessageKeys.size > 2000) {
+          const oldest = seenMessageKeys.values().next();
+          if (!oldest.done) seenMessageKeys.delete(oldest.value);
+        }
       }
-    } catch {
-      // ignore — history is best-effort
-    }
+
+      setConversations((current) => {
+        const index = current.findIndex((conversation) => isConversation(conversation, message.threadId, message.threadType));
+        if (index === -1) {
+          if (mediaUpdate) return current;
+          return [{
+            id: message.threadId,
+            type: message.threadType,
+            name: message.fromName || message.threadId,
+            lastMessage: message,
+            unread: threadIsActive || message.isSelf ? 0 : 1,
+          }, ...current];
+        }
+
+        const conversation = current[index];
+        const previous = conversation.lastMessage;
+        const sameMessage = previous?.id === message.id;
+        const newest = !mediaUpdate && !seen && !sameMessage && (!previous || message.ts >= previous.ts);
+        const unread = threadIsActive ? 0 : conversation.unread + Number(!mediaUpdate && !message.isSelf && !seen && !sameMessage);
+        if (sameMessage || newest || unread !== conversation.unread) {
+          const updated = {
+            ...conversation,
+            unread,
+            lastMessage: sameMessage ? mergeMessage(previous, message) : newest ? message : previous,
+          };
+          if (newest) return [updated, ...current.filter((_, position) => position !== index)];
+          return current.map((item, position) => position === index ? updated : item);
+        }
+        return current;
+      });
+
+      if (threadIsActive) setMessages((current) => mergeThreadMessages(current, [message]));
+    };
+
+    const onReaction = ({ threadId, threadType, msgId, icon, senderId, senderName }: {
+      threadId: string; threadType: ThreadType; msgId: string; icon: string; senderId: string; senderName: string;
+    }) => {
+      if (!isConversation(activeRef.current, threadId, threadType)) return;
+      setMessages((current) => current.map((message) => message.id === msgId
+        ? addReaction(message, icon, senderId, senderName)
+        : message));
+    };
+
+    sock.on("message", onMessage);
+    sock.on("message_reaction", onReaction);
+    void loadConversations();
+    return () => {
+      controller.abort();
+      sock.off("message", onMessage);
+      sock.off("message_reaction", onReaction);
+      sock.disconnect();
+    };
   }, []);
 
   useEffect(() => {
     if (!active) return;
-    loadMessages(active.id);
-    if (active.type === "Group") {
-      loadGroupHistory(active.id);
-    }
-    // Mark as read
-    fetch("/api/chat/mark-read", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ threadId: active.id }),
-    }).catch(() => {});
-    setConversations((prev) =>
-      prev.map((c) => (c.id === active.id ? { ...c, unread: 0 } : c))
-    );
-  }, [active, loadMessages, loadGroupHistory]);
+    const { id: threadId, type: threadType } = active;
+    const controller = new AbortController();
+    const { signal } = controller;
 
-  // Socket.io for real-time messages
-  useEffect(() => {
-    const sock = getSocket();
-
-    const onMessage = (msg: ChatMessage) => {
-      const currentActiveId = activeRef.current?.id;
-
-      // Always update conversation list — and bubble the updated conv to top
-      setConversations((prev) => {
-        const idx = prev.findIndex((c) => c.id === msg.threadId);
-        if (idx >= 0) {
-          const updated = {
-            ...prev[idx],
-            lastMessage: msg,
-            unread:
-              currentActiveId === msg.threadId || msg.isSelf
-                ? 0
-                : (prev[idx].unread ?? 0) + 1,
-          };
-          // Remove from current position and put at top
-          const rest = prev.filter((_, i) => i !== idx);
-          return [updated, ...rest];
+    const loadMessages = async (url: string, history = false) => {
+      try {
+        const response = await fetch(url, { signal });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        if (signal.aborted || activeRef.current !== active || !Array.isArray(data.messages)) return;
+        const messages = (data.messages as ChatMessage[]).filter((message) =>
+          message?.threadId === threadId && message.threadType === threadType);
+        if (messages.length > 0) {
+          setMessages((current) => mergeThreadMessages(current, messages, history));
         }
-        // Brand new conversation — prepend
-        return [
-          {
-            id: msg.threadId,
-            type: msg.threadType,
-            name: msg.fromName || msg.threadId,
-            lastMessage: msg,
-            unread: msg.isSelf ? 0 : 1,
-          },
-          ...prev,
-        ];
-      });
-
-      // Append message to active thread
-      if (msg.threadId === currentActiveId) {
-        setMessages((prev) => {
-          if (prev.some((m) => m.id === msg.id)) return prev;
-          return [...prev, msg];
-        });
+      } catch (error) {
+        if (!signal.aborted) console.error(history ? "Không thể tải lịch sử nhóm:" : "Không thể tải tin nhắn:", error);
       }
     };
 
-    sock.on("message", onMessage);
-    return () => {
-      sock.off("message", onMessage);
-    };
-  }, []); // register once only — uses activeRef, not active state
+    const encodedThreadId = encodeURIComponent(threadId);
+    void loadMessages(`/api/chat/messages?threadId=${encodedThreadId}&threadType=${threadType}`);
+    if (threadType === "Group") {
+      void loadMessages(`/api/chat/history?groupId=${encodedThreadId}&count=50`, true);
+    }
 
-  // Socket.io for real-time reactions
-  useEffect(() => {
-    const sock = getSocket();
+    void fetch("/api/chat/mark-read", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ threadId, threadType }),
+    }).then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    }).catch((error) => console.error("Không thể đánh dấu đã đọc:", error));
 
-    const onReaction = (payload: { threadId: string; msgId: string; icon: string; senderId: string; senderName: string }) => {
-      if (payload.threadId !== activeRef.current?.id) return;
-      setMessages((prev) =>
-        prev.map((m) => {
-          if (m.id !== payload.msgId) return m;
-          const reactions: MessageReaction[] = m.reactions ? [...m.reactions] : [];
-          const existing = reactions.find((r) => r.icon === payload.icon);
-          if (existing) {
-            if (existing.senderIds.includes(payload.senderId)) return m;
-            return { ...m, reactions: reactions.map((r) =>
-              r.icon === payload.icon
-                ? { ...r, senderIds: [...r.senderIds, payload.senderId], senderNames: [...r.senderNames, payload.senderName] }
-                : r
-            )};
-          }
-          return { ...m, reactions: [...reactions, { icon: payload.icon, senderIds: [payload.senderId], senderNames: [payload.senderName] }] };
-        })
-      );
-    };
-
-    sock.on("message_reaction", onReaction);
-    return () => {
-      sock.off("message_reaction", onReaction);
-    };
-  }, []);
+    return () => controller.abort();
+  }, [active]);
 
   // Auto-scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const handleSelectConversation = (conv: Conversation) => {
-    setActive(conv);
+  const handleSelectConversation = (conversation: Conversation | null) => {
+    if (conversation && isConversation(activeRef.current, conversation.id, conversation.type)) return;
+    const selected = conversation && { ...conversation };
+    activeRef.current = selected;
+    setActive(selected);
     setMessages([]);
-    inputRef.current?.focus();
+    setHoveredMsgId(null);
+    if (selected) {
+      setConversations((current) => current.map((item) =>
+        isConversation(item, selected.id, selected.type) ? { ...item, unread: 0 } : item));
+      inputRef.current?.focus();
+    }
   };
 
   const handleSend = async () => {
@@ -505,10 +625,10 @@ export default function ChatPage() {
   };
 
   return (
-    <div className="h-screen flex flex-col bg-gray-50">
+    <div className="h-[100dvh] flex flex-col bg-gray-50">
       {/* Header */}
-      <header className="bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between flex-shrink-0">
-        <div className="flex items-center gap-4">
+      <header className={`bg-white border-b border-gray-200 px-3 sm:px-4 py-3 items-center justify-between shrink-0 ${active ? "hidden md:flex" : "flex"}`}>
+        <div className="flex items-center gap-2 sm:gap-4">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center">
               <span className="text-white font-bold text-xs">Z</span>
@@ -532,7 +652,7 @@ export default function ChatPage() {
             href="https://github.com/zack-the-worker/yan-zalo-web"
             target="_blank"
             rel="noopener noreferrer"
-            className="text-gray-400 hover:text-gray-700 transition-colors"
+            className="hidden sm:block text-gray-400 hover:text-gray-700 transition-colors"
             title="GitHub"
           >
             <svg viewBox="0 0 24 24" className="w-5 h-5" fill="currentColor" aria-hidden="true">
@@ -548,9 +668,9 @@ export default function ChatPage() {
         </div>
       </header>
 
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Sidebar */}
-        <aside className="w-72 bg-white border-r border-gray-200 flex flex-col flex-shrink-0">
+        <aside className={`${active ? "hidden md:flex" : "flex"} w-full md:w-72 bg-white border-r border-gray-200 flex-col shrink-0 min-h-0`}>
           {/* Search */}
           <div className="p-3 border-b border-gray-100">
             <input
@@ -558,7 +678,7 @@ export default function ChatPage() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Tìm kiếm..."
-              className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300"
+              className="w-full text-base md:text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300"
             />
           </div>
 
@@ -588,14 +708,14 @@ export default function ChatPage() {
             )}
             {filteredConvs.map((conv) => (
               <button
-                key={conv.id}
+                key={conversationKey(conv.id, conv.type)}
                 onClick={() => handleSelectConversation(conv)}
                 className={`w-full flex items-center gap-3 px-3 py-3 hover:bg-gray-50 text-left transition-colors ${
-                  active?.id === conv.id ? "bg-blue-50" : ""
+                  isConversation(active, conv.id, conv.type) ? "bg-blue-50" : ""
                 }`}
               >
                 {/* Avatar */}
-                <div className="relative flex-shrink-0">
+                <div className="relative shrink-0" aria-hidden="true">
                   {conv.avatar ? (
                     <img
                       src={conv.avatar}
@@ -641,7 +761,9 @@ export default function ChatPage() {
                       }`}
                     >
                       {conv.lastMessage.isSelf ? "Bạn: " : ""}
-                      {conv.lastMessage.mediaType === "sticker" ? "🖼 [Sticker]" : conv.lastMessage.content}
+                      {conv.lastMessage.mediaType === "sticker"
+                        ? "[Sticker]"
+                        : conv.lastMessage.content || (conv.lastMessage.mediaType === "image" ? "[Hình ảnh]" : conv.lastMessage.mediaType === "video" ? "[Video]" : "")}
                     </p>
                   )}
                 </div>
@@ -658,7 +780,7 @@ export default function ChatPage() {
         </aside>
 
         {/* Chat area */}
-        <main className="flex-1 flex flex-col overflow-hidden">
+        <main className={`${active ? "flex" : "hidden md:flex"} min-w-0 flex-1 flex-col overflow-hidden`}>
           {!active ? (
             <div className="flex-1 flex items-center justify-center">
               <div className="text-center text-gray-400">
@@ -670,7 +792,10 @@ export default function ChatPage() {
           ) : (
             <>
               {/* Thread header */}
-              <div className="bg-white border-b border-gray-200 px-5 py-3 flex items-center gap-3 flex-shrink-0">
+              <div className="bg-white border-b border-gray-200 px-3 sm:px-5 py-3 flex items-center gap-3 shrink-0">
+                <button type="button" onClick={() => handleSelectConversation(null)} className="md:hidden w-11 h-11 -ml-2 flex items-center justify-center rounded-xl text-gray-600" aria-label="Quay lại danh sách hội thoại">
+                  <ArrowLeft className="w-5 h-5" />
+                </button>
                 {active.avatar ? (
                   <img
                     src={active.avatar}
@@ -686,9 +811,9 @@ export default function ChatPage() {
                     {active.name.charAt(0).toUpperCase()}
                   </div>
                 )}
-                <div>
-                  <p className="font-semibold text-gray-800 text-sm">{active.name}</p>
-                  <p className="text-xs text-gray-400">
+                <div className="min-w-0">
+                  <p className="font-semibold text-gray-800 text-sm truncate">{active.name}</p>
+                  <p className="text-xs text-gray-400 truncate">
                     {active.type === "Group" ? "Nhóm" : "Bạn bè"} • {active.id}
                   </p>
                 </div>
@@ -703,12 +828,12 @@ export default function ChatPage() {
                 )}
                 {messages.map((msg) => (
                   <div
-                    key={msg.id}
+                    key={`${active.type}:${active.id}:${msg.id}`}
                     className={`flex ${msg.isSelf ? "justify-end" : "justify-start"}`}
                     onMouseEnter={() => setHoveredMsgId(msg.id)}
                     onMouseLeave={() => setHoveredMsgId(null)}
                   >
-                    <div className="relative max-w-xs lg:max-w-md xl:max-w-lg">
+                    <div className="relative min-w-0 max-w-xs lg:max-w-md xl:max-w-lg">
                     <div
                       className={`${
                         msg.isSelf ? "items-end" : "items-start"
@@ -723,7 +848,7 @@ export default function ChatPage() {
                         className={`${
                           msg.mediaType === "sticker"
                             ? ""
-                            : `px-4 py-2.5 rounded-2xl text-sm break-words ${
+                            : `max-w-full min-w-0 px-4 py-2.5 rounded-2xl text-sm break-words ${
                                 msg.isSelf
                                   ? "bg-blue-500 text-white rounded-br-sm"
                                   : "bg-white text-gray-800 border border-gray-200 rounded-bl-sm shadow-sm"
@@ -732,19 +857,23 @@ export default function ChatPage() {
                       >
                         {msg.mediaType === "sticker" ? (
                           msg.mediaUrl ? (
-                            // eslint-disable-next-line @next/next/no-img-element
-                            <img
+                            <Image
                               src={msg.mediaUrl}
                               alt="sticker"
+                              width={96}
+                              height={96}
+                              unoptimized
                               className="w-24 h-24 object-contain"
                             />
                           ) : (
-                            <span className="text-2xl">🖼</span>
+                            <ImageOff className="w-6 h-6 text-gray-500" aria-label="Sticker không khả dụng" />
                           )
                         ) : msg.mediaType === "file" ? (
                           <a href={msg.mediaUrl} target="_blank" rel="noopener noreferrer" className="underline flex items-center gap-1">
                             <Paperclip className="w-3 h-3" /> {msg.content}
                           </a>
+                        ) : msg.mediaType === "image" || msg.mediaType === "video" ? (
+                          <ArchivedMedia mediaType={msg.mediaType} mediaUrl={msg.mediaUrl} content={msg.content} />
                         ) : (
                           msg.content
                         )}
@@ -804,7 +933,7 @@ export default function ChatPage() {
               </div>
 
               {/* Input */}
-              <div className="bg-white border-t border-gray-200 px-4 py-3 flex items-end gap-2 flex-shrink-0">
+              <div className="relative bg-white border-t border-gray-200 px-2 sm:px-4 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:py-3 flex flex-wrap items-end gap-1 sm:gap-2 shrink-0">
                 {/* Hidden file input */}
                 <input
                   ref={fileInputRef}
@@ -851,7 +980,7 @@ export default function ChatPage() {
                   {templateOpen && (
                     <div
                       ref={templatePanelRef}
-                      className="absolute bottom-12 left-0 w-80 bg-white border border-gray-200 rounded-2xl shadow-2xl overflow-hidden z-50"
+                      className="fixed bottom-28 left-2 right-2 sm:absolute sm:bottom-12 sm:left-0 sm:right-auto sm:w-80 bg-white border border-gray-200 rounded-2xl shadow-2xl overflow-hidden z-50"
                     >
                       {/* Panel header */}
                       <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100">
@@ -951,7 +1080,7 @@ export default function ChatPage() {
                   </button>
 
                   {pickerOpen && (
-                    <div className="absolute bottom-12 left-0 w-80 bg-white border border-gray-200 rounded-2xl shadow-2xl overflow-hidden z-50">
+                    <div className="fixed bottom-28 left-2 right-2 sm:absolute sm:bottom-12 sm:left-0 sm:right-auto sm:w-80 bg-white border border-gray-200 rounded-2xl shadow-2xl overflow-hidden z-50">
                       {/* Picker tabs */}
                       <div className="flex border-b border-gray-100">
                         <button
@@ -1042,7 +1171,7 @@ export default function ChatPage() {
                   )}
                 </div>
 
-                <div className="flex-1 flex flex-col gap-1">
+                <div className="w-full order-first sm:order-none sm:w-auto sm:flex-1 min-w-0 flex flex-col gap-1">
                   {pendingFile && (
                     <div className="flex items-center gap-2 px-1">
                       <Paperclip className="w-3.5 h-3.5 text-blue-500 flex-shrink-0" />
@@ -1063,14 +1192,14 @@ export default function ChatPage() {
                     onKeyDown={handleKeyDown}
                     placeholder="Nhập tin nhắn... (Enter để gửi, Shift+Enter xuống dòng)"
                     rows={1}
-                    className="flex-1 resize-none text-sm border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-300 max-h-32 overflow-y-auto"
+                    className="flex-1 resize-none text-base sm:text-sm border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-300 max-h-32 overflow-y-auto"
                     style={{ minHeight: "44px" }}
                   />
                 </div>
                 <button
                   onClick={handleSend}
                   disabled={(!text.trim() && !pendingFile) || sending}
-                  className="bg-blue-500 hover:bg-blue-600 disabled:bg-blue-300 text-white px-5 py-3 rounded-xl text-sm font-medium transition-colors flex-shrink-0"
+                  className="ml-auto sm:ml-0 bg-blue-500 hover:bg-blue-600 disabled:bg-blue-300 text-white px-5 py-3 rounded-xl text-sm font-medium transition-colors shrink-0"
                 >
                   {sending ? "..." : "Gửi"}
                 </button>
@@ -1082,8 +1211,8 @@ export default function ChatPage() {
 
       {/* Forward Message Modal */}
       {forwardingMessage && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setForwardingMessage(null)}>
-          <div className="bg-white rounded-2xl shadow-2xl w-96 max-h-[80vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setForwardingMessage(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-96 max-h-[80dvh] flex flex-col" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
               <h3 className="font-semibold text-gray-800">Chuyển tiếp tin nhắn</h3>
               <button onClick={() => setForwardingMessage(null)} className="text-gray-400 hover:text-gray-600">✕</button>
@@ -1112,7 +1241,7 @@ export default function ChatPage() {
                     .filter((c) => !forwardSearch || c.name.toLowerCase().includes(forwardSearch.toLowerCase()))
                     .map((conv) => (
                       <button
-                        key={conv.id}
+                        key={conversationKey(conv.id, conv.type)}
                         onClick={() => handleForwardConfirm(conv)}
                         className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors text-left"
                       >
@@ -1134,8 +1263,8 @@ export default function ChatPage() {
 
       {/* Poll Creation Modal */}
       {showPollModal && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setShowPollModal(false)}>
-          <div className="bg-white rounded-2xl shadow-2xl w-96 max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setShowPollModal(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-96 max-h-[90dvh] flex flex-col" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
               <h3 className="font-semibold text-gray-800">Tạo bình chọn</h3>
               <button onClick={() => setShowPollModal(false)} className="text-gray-400 hover:text-gray-600">✕</button>

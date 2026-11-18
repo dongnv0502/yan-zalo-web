@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getZaloApi, isLoggedIn } from "@/lib/zalo";
-import type { ChatMessage } from "@/lib/messageStore";
+import { ingestZaloMessage } from "@/lib/chatIngest";
+import { getMessages } from "@/lib/messageStore";
 
 export async function GET(req: NextRequest) {
   const sid = req.cookies.get("zalo_sid")?.value ?? "";
@@ -14,61 +15,22 @@ export async function GET(req: NextRequest) {
   if (!groupId) {
     return NextResponse.json({ error: "Missing groupId" }, { status: 400 });
   }
+  if (!Number.isInteger(count) || count < 1 || count > 50) {
+    return NextResponse.json({ error: "count must be between 1 and 50" }, { status: 400 });
+  }
 
   const api = getZaloApi(sid)!;
-  const ownId = api.getOwnId();
 
   try {
     const result = await api.getGroupChatHistory(groupId, count);
-    const messages: ChatMessage[] = (result.groupMsgs ?? [])
-      .map((msg) => {
-        const data = msg.data;
-        const isSelf = msg.isSelf ?? data.uidFrom === ownId;
-
-        let content: string;
-        let mediaType: ChatMessage["mediaType"];
-        let mediaUrl: string | undefined;
-
-        if (data.msgType === "chat.sticker") {
-          content = "[Sticker]";
-          mediaType = "sticker";
-          // URL not resolved here (no async in map); frontend shows placeholder
-        } else if (typeof data.content === "string") {
-          content = data.content;
-        } else if (
-          data.content &&
-          typeof data.content === "object" &&
-          "msg" in data.content &&
-          typeof (data.content as { msg: unknown }).msg === "string"
-        ) {
-          content = (data.content as { msg: string }).msg;
-        } else {
-          content = "[media]";
-        }
-
-        const chatMsg: ChatMessage = {
-          id: String(data.msgId ?? data.cliMsgId ?? Date.now()),
-          threadId: msg.threadId,
-          threadType: "Group",
-          fromId: data.uidFrom ?? "",
-          fromName: data.dName ?? data.uidFrom ?? "",
-          content,
-          ts: Number(data.ts ?? 0),
-          isSelf,
-          ...(mediaType && { mediaType }),
-          ...(mediaUrl && { mediaUrl }),
-        };
-
-        return chatMsg;
-      })
-      // Oldest first
-      .sort((a, b) => a.ts - b.ts);
-
-    return NextResponse.json({ messages, more: result.more });
-  } catch (err: unknown) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to load history" },
-      { status: 500 }
-    );
+    const upstream = (result.groupMsgs ?? []).filter(message => message.threadId === groupId);
+    for (let start = 0; start < upstream.length; start += 4) {
+      await Promise.all(upstream.slice(start, start + 4).map(message => ingestZaloMessage(api, sid, message, false)));
+    }
+    const importedIds = new Set(upstream.map(({ data }) => String(data.msgId || data.cliMsgId)));
+    const messages = getMessages(groupId, api.getOwnId(), "Group").filter(message => importedIds.has(message.id));
+    return NextResponse.json({ messages, more: result.more }, { headers: { "Cache-Control": "private, no-store" } });
+  } catch {
+    return NextResponse.json({ error: "Failed to load history" }, { status: 502 });
   }
 }

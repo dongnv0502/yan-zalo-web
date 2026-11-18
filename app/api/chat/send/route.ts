@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getZaloApi, isLoggedIn } from "@/lib/zalo";
 import { ThreadType } from "zca-js";
-import { storeMessage, type ChatMessage } from "@/lib/messageStore";
-import { getSocketServer } from "@/lib/socketServer";
+import { publishChatMessage } from "@/lib/chatIngest";
+import type { ChatMessage } from "@/types/chat";
 
 export async function POST(req: NextRequest) {
   const sid = req.cookies.get("zalo_sid")?.value ?? "";
@@ -24,7 +24,7 @@ export async function POST(req: NextRequest) {
 
   const { threadId, threadType, text } = body;
 
-  if (!threadId || !text?.trim()) {
+  if (typeof threadId !== "string" || !threadId || typeof text !== "string" || !text.trim()) {
     return NextResponse.json(
       { error: "threadId and text are required" },
       { status: 400 }
@@ -35,30 +35,25 @@ export async function POST(req: NextRequest) {
   const zaloType = isGroup ? ThreadType.Group : ThreadType.User;
 
   try {
-    await api.sendMessage(text.trim(), threadId, zaloType);
+    const { message } = await api.sendMessage(text.trim(), threadId, zaloType);
+    if (!message) return NextResponse.json({ error: "No message returned by Zalo" }, { status: 502 });
 
     const ownId = api.getOwnId();
     const sentMsg: ChatMessage = {
-      id: String(Date.now()),
+      id: String(message.msgId),
       threadId,
       threadType: isGroup ? "Group" : "User",
-      fromId: ownId ?? "me",
+      fromId: ownId,
       fromName: "Tôi",
       content: text.trim(),
       ts: Date.now(),
       isSelf: true,
     };
 
-    storeMessage(sentMsg, sid);
-
-    const io = getSocketServer();
-    if (io) {
-      io.to(sid).emit("message", sentMsg);
-    }
+    publishChatMessage(sentMsg, ownId, sid);
 
     return NextResponse.json({ ok: true, message: sentMsg });
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : "Unknown error";
-    return NextResponse.json({ error: msg }, { status: 500 });
+  } catch {
+    return NextResponse.json({ error: "Failed to send message" }, { status: 502 });
   }
 }

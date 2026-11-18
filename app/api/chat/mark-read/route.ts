@@ -1,24 +1,26 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isLoggedIn } from "@/lib/zalo";
+import { getZaloApi } from "@/lib/zalo";
 import { markRead } from "@/lib/messageStore";
 
 export async function POST(req: NextRequest) {
   const sid = req.cookies.get("zalo_sid")?.value ?? "";
-  if (!sid || !isLoggedIn(sid)) {
+  const api = getZaloApi(sid);
+  if (!api) {
     return NextResponse.json({ error: "Not logged in" }, { status: 401 });
   }
 
-  let body: { threadId?: string };
+  let body: { threadId?: string; threadType?: string };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  if (!body.threadId) {
-    return NextResponse.json({ error: "Missing threadId" }, { status: 400 });
+  const { threadId, threadType } = body;
+  if (typeof threadId !== "string" || !threadId || (threadType !== "User" && threadType !== "Group")) {
+    return NextResponse.json({ error: "threadId and threadType are required" }, { status: 400 });
   }
 
-  markRead(body.threadId, sid);
+  markRead(threadId, api.getOwnId(), threadType);
   return NextResponse.json({ ok: true });
 }

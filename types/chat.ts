@@ -1,3 +1,37 @@
+export type ThreadType = "User" | "Group";
+export type MediaType = "sticker" | "image" | "video" | "file" | "poll";
+
+export interface MessageReaction {
+  icon: string;
+  senderIds: string[];
+  senderNames: string[];
+}
+
+export interface ChatMessage {
+  id: string;
+  threadId: string;
+  threadType: ThreadType;
+  fromId: string;
+  fromName: string;
+  content: string;
+  ts: number;
+  isSelf: boolean;
+  mediaType?: MediaType;
+  mediaUrl?: string;
+  cliMsgId?: string;
+  pollId?: number;
+  reactions?: MessageReaction[];
+}
+
+export interface Conversation {
+  id: string;
+  type: ThreadType;
+  name: string;
+  avatar?: string;
+  lastMessage?: ChatMessage;
+  unread: number;
+}
+
 export interface StickerDetail {
   id: number;
   cateId: number;

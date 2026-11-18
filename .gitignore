@@ -95,6 +95,7 @@ node_modules/
 tsconfig.tsbuildinfo
 
 # Local env
+.env
 .env*.local
 .env.local
 

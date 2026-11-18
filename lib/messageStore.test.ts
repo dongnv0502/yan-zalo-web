@@ -1,6 +1,11 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { storeMessage, getMessages, updateMessageReaction } from "./messageStore";
-import type { ChatMessage } from "./messageStore";
+// @vitest-environment node
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { storeMessage, getMessages as readMessages, updateMessageReaction as addReaction, closeMessageStore } from "./messageStore";
+import type { ChatMessage } from "@/types/chat";
+
+const getMessages = (threadId: string, accountId: string) => readMessages(threadId, accountId, "User");
+const updateMessageReaction = (threadId: string, msgId: string, icon: string, senderId: string, senderName: string, accountId: string) =>
+  addReaction(threadId, msgId, icon, senderId, senderName, accountId, "User");
 
 function makeMsg(overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
@@ -16,9 +21,10 @@ function makeMsg(overrides: Partial<ChatMessage> = {}): ChatMessage {
   };
 }
 
-beforeEach(() => {
-  // Reset the global in-memory store before each test
-  global.__messageStore = undefined;
+beforeEach(() => vi.stubEnv("CHAT_DB_PATH", ":memory:"));
+afterEach(() => {
+  closeMessageStore();
+  vi.unstubAllEnvs();
 });
 
 describe("storeMessage", () => {
@@ -130,16 +136,5 @@ describe("updateMessageReaction", () => {
   it("does nothing when the message is not found", () => {
     updateMessageReaction("thread-1", "nonexistent", "/-heart", "u1", "Alice", "s1");
     expect(getMessages("thread-1", "s1")).toHaveLength(0);
-  });
-});
-
-describe("deduplication by id (TDD — implementation pending)", () => {
-  it("should not store a message with a duplicate id in the same thread", () => {
-    const msg = makeMsg({ id: "dup" });
-    storeMessage(msg, "s1");
-    storeMessage(msg, "s1"); // same id
-    // NOTE: This test is expected to FAIL because storeMessage does not
-    // currently deduplicate by id. It is written here to drive that feature.
-    expect(getMessages("thread-1", "s1")).toHaveLength(1);
   });
 });

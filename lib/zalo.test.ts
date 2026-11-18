@@ -10,6 +10,8 @@ vi.mock("./socketServer", () => ({
   getSocketServer: vi.fn(() => null),
 }));
 
+vi.mock("./chatIngest", () => ({ ingestZaloMessage: vi.fn() }));
+
 vi.mock("./messageStore", () => ({
   storeMessage: vi.fn(),
   getMessages: vi.fn(() => []),
@@ -24,7 +26,7 @@ import {
   wireMessageListener,
 } from "./zalo";
 import type { GroupEventLog } from "./zalo";
-import { updateMessageReaction, getMessages } from "./messageStore";
+import { updateMessageReaction } from "./messageStore";
 import { getSocketServer } from "./socketServer";
 
 function makeEvent(overrides: Partial<GroupEventLog> = {}): GroupEventLog {
@@ -94,14 +96,14 @@ describe("wireMessageListener — reaction event", () => {
     handlers["reaction"]({
       threadId: "t-1",
       data: {
-        msgId: "m-1",
+        msgId: "reaction-id",
         uidFrom: "u-2",
         dName: "Bob",
-        content: { rIcon: "/-heart" },
+        content: { rIcon: "/-heart", rMsg: [{ gMsgID: "m-1" }] },
       },
     });
 
-    expect(updateMessageReaction).toHaveBeenCalledWith("t-1", "m-1", "/-heart", "u-2", "Bob", "s1");
+    expect(updateMessageReaction).toHaveBeenCalledWith("t-1", "m-1", "/-heart", "u-2", "Bob", "own-id", "User");
   });
 
   it("emits message_reaction via socket when reaction fires and io is available", () => {
@@ -120,12 +122,14 @@ describe("wireMessageListener — reaction event", () => {
 
     handlers["reaction"]({
       threadId: "t-1",
-      data: { msgId: "m-1", uidFrom: "u-2", dName: "Bob", content: { rIcon: "/-heart" } },
+      isGroup: true,
+      data: { msgId: "reaction-id", uidFrom: "u-2", dName: "Bob", content: { rIcon: "/-heart", rMsg: [{ gMsgID: "m-1" }] } },
     });
 
     expect(mockTo).toHaveBeenCalledWith("s1");
     expect(mockEmit).toHaveBeenCalledWith("message_reaction", expect.objectContaining({
       threadId: "t-1",
+      threadType: "Group",
       msgId: "m-1",
       icon: "/-heart",
       senderId: "u-2",
