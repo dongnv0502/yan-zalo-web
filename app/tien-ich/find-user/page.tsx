@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import Image from "next/image";
+import { UserRoundPlus } from "lucide-react";
 import type { UserInfo } from "@/types/utilities";
 
 const GENDER_LABEL: Record<number, string> = {
@@ -14,13 +15,20 @@ export default function FindUserPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [user, setUser] = useState<UserInfo | null>(null);
+  const [message, setMessage] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [sent, setSent] = useState(false);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!phone.trim()) return;
+    if (loading || sending || !phone.trim()) return;
     setLoading(true);
     setError(null);
     setUser(null);
+    setMessage("");
+    setSendError(null);
+    setSent(false);
 
     try {
       const res = await fetch(
@@ -39,13 +47,38 @@ export default function FindUserPage() {
     }
   };
 
+  const handleSend = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user?.uid || sending || sent) return;
+    setSending(true);
+    setSendError(null);
+
+    try {
+      const res = await fetch("/api/utilities/send-friend-request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uid: user.uid, message }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        setSendError(data.error ?? "Không thể gửi lời mời kết bạn.");
+        return;
+      }
+      setSent(true);
+    } catch {
+      setSendError("Không nhận được xác nhận gửi lời mời kết bạn.");
+    } finally {
+      setSending(false);
+    }
+  };
+
   return (
     <div>
       <h1 className="text-xl font-bold text-gray-800 mb-2">
         Tra cứu tài khoản Zalo
       </h1>
       <p className="text-sm text-gray-500 mb-6">
-        Nhập số điện thoại để xem thông tin công khai của tài khoản Zalo.
+        Nhập số điện thoại để xem thông tin và gửi lời mời kết bạn.
       </p>
 
       {/* Search form */}
@@ -61,7 +94,7 @@ export default function FindUserPage() {
           />
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || sending}
             className="bg-blue-500 hover:bg-blue-600 disabled:bg-blue-300 text-white font-medium px-5 py-3 rounded-xl transition-colors text-sm"
           >
             {loading ? "Đang tìm..." : "Tra cứu"}
@@ -116,6 +149,33 @@ export default function FindUserPage() {
             <span className="text-xs text-gray-500">Có tài khoản Zalo</span>
             <span className="text-xs text-gray-300 ml-1">· UID: {user.uid}</span>
           </div>
+
+          {user.uid && (
+            <form onSubmit={handleSend} className="mt-4 space-y-3 border-t border-gray-100 pt-4">
+              <label className="block text-sm font-medium text-gray-700">
+                Lời nhắn (không bắt buộc)
+                <textarea
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  maxLength={2048}
+                  rows={2}
+                  disabled={sending || sent}
+                  placeholder="Xin chào, mình kết bạn nhé!"
+                  className="mt-1 block w-full rounded-xl border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 disabled:bg-gray-50"
+                />
+              </label>
+              <button
+                type="submit"
+                disabled={sending || sent}
+                className="inline-flex items-center gap-2 rounded-xl bg-blue-500 px-4 py-2 text-sm font-medium text-white hover:bg-blue-600 disabled:bg-blue-300"
+              >
+                <UserRoundPlus aria-hidden="true" className="w-4 h-4" />
+                {sending ? "Đang gửi..." : "Gửi lời mời kết bạn"}
+              </button>
+              {sent && <p role="status" className="text-sm text-green-700">Đã gửi lời mời kết bạn.</p>}
+              {sendError && <p role="alert" className="text-sm text-red-600">{sendError}</p>}
+            </form>
+          )}
         </div>
       )}
     </div>

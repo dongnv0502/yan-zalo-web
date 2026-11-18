@@ -21,7 +21,7 @@
 ### 🛠️ Tiện ích
 | Tiện ích | Mô tả |
 |----------|-------|
-| **Tra cứu người dùng** | Nhập số điện thoại → xem thông tin Zalo public |
+| **Tra cứu người dùng** | Nhập số điện thoại → xem thông tin Zalo → chọn **Gửi lời mời kết bạn**. Để trống lời nhắn nếu muốn dùng câu chào mặc định. |
 | **Nhóm chung** | Xem bạn có nhóm chung nào với một người |
 | **Preview link** | Paste URL → xem thumbnail, tiêu đề, mô tả trước khi gửi |
 | **Giờ hoạt động cuối** | Xem lần cuối ai đó online (kể cả người không phải bạn bè) |
