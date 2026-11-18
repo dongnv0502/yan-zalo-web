@@ -10,6 +10,7 @@
 
 ### 💬 Chat
 - Xem danh sách hội thoại (bạn bè & nhóm) theo thời gian thực qua Socket.io
+  - Khi mở lại `/chat`, hội thoại đã lưu hiện trước; bạn bè và nhóm được làm mới độc lập để một danh sách chậm không chặn danh sách kia.
 - Gửi tin nhắn văn bản, emoji, sticker
 - **Đính kèm file** — chọn file, xem preview, gửi kèm văn bản hoặc gửi riêng
 - **Ảnh và video trong chat** — xem ảnh và phát video ngay trong hội thoại; ảnh/video được lưu riêng tư trong RustFS.

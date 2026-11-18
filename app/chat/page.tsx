@@ -170,6 +170,10 @@ export default function ChatPage() {
 function AuthenticatedChat() {
   const router = useRouter();
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [listStatus, setListStatus] = useState<Record<ThreadType, "loading" | "ready" | "error">>({
+    User: "loading",
+    Group: "loading",
+  });
   const [active, setActive] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [text, setText] = useState("");
@@ -221,14 +225,23 @@ function AuthenticatedChat() {
     const { signal } = controller;
     const sock = io({ path: "/api/socketio", transports: ["websocket", "polling"] });
     const seenMessageKeys = new Set<string>();
+    const refreshedTypes = new Set<ThreadType>();
 
-    const loadConversations = async () => {
+    const loadConversations = async (type?: ThreadType) => {
       try {
-        const response = await fetch("/api/chat/conversations", { signal });
+        const url = type ? `/api/chat/conversations?type=${type}` : "/api/chat/conversations";
+        const response = await fetch(url, { signal });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
-        if (signal.aborted || !Array.isArray(data.conversations)) return;
-        const snapshot: Conversation[] = data.conversations;
+        if (signal.aborted) return;
+        if (!Array.isArray(data.conversations)) throw new Error("Invalid conversations response");
+        const snapshot: Conversation[] = type
+          ? data.conversations
+          : (data.conversations as Conversation[]).filter((conversation) => !refreshedTypes.has(conversation.type));
+        if (type) {
+          refreshedTypes.add(type);
+          setListStatus((current) => ({ ...current, [type]: "ready" }));
+        }
         const selected = activeRef.current;
 
         // Keep messages that arrived while the initial conversation list was loading.
@@ -251,7 +264,9 @@ function AuthenticatedChat() {
           return Array.from(byThread.values()).sort((left, right) => (right.lastMessage?.ts ?? 0) - (left.lastMessage?.ts ?? 0));
         });
       } catch (error) {
-        if (!signal.aborted) console.error("Không thể tải cuộc trò chuyện:", error);
+        if (signal.aborted) return;
+        if (type) setListStatus((current) => ({ ...current, [type]: "error" }));
+        console.error("Không thể tải cuộc trò chuyện:", error);
       }
     };
 
@@ -313,6 +328,8 @@ function AuthenticatedChat() {
     sock.on("message", onMessage);
     sock.on("message_reaction", onReaction);
     void loadConversations();
+    void loadConversations("User");
+    void loadConversations("Group");
     return () => {
       controller.abort();
       sock.off("message", onMessage);
@@ -603,6 +620,7 @@ function AuthenticatedChat() {
     router.replace("/login");
   };
 
+  const sidebarStatus = listStatus[tab === "group" ? "Group" : "User"];
   const filteredConvs = conversations.filter((c) => {
     const matchTab = tab === "group" ? c.type === "Group" : c.type === "User";
     const matchSearch =
@@ -702,8 +720,10 @@ function AuthenticatedChat() {
           {/* Conversation list */}
           <div className="flex-1 overflow-y-auto">
             {filteredConvs.length === 0 && (
-              <p className="text-center text-gray-400 text-sm py-8">
-                {search ? "Không tìm thấy" : "Chưa có tin nhắn"}
+              <p role="status" className="text-center text-gray-400 text-sm py-8">
+                {sidebarStatus === "loading" ? (tab === "group" ? "Đang tải nhóm…" : "Đang tải bạn bè…")
+                  : sidebarStatus === "error" ? (tab === "group" ? "Không thể tải nhóm" : "Không thể tải bạn bè")
+                  : search ? "Không tìm thấy" : "Chưa có tin nhắn"}
               </p>
             )}
             {filteredConvs.map((conv) => (

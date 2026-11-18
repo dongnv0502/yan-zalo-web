@@ -36,6 +36,8 @@ function mockChatApi(overrides: Record<string, () => Response | Promise<Response
     if (overrides[url]) return overrides[url]();
     if (url === "/api/auth/status") return Response.json({ status: "logged_in" });
     if (url === "/api/chat/conversations") return Response.json({ conversations: [direct, group] });
+    if (url === "/api/chat/conversations?type=User") return Response.json({ conversations: [direct] });
+    if (url === "/api/chat/conversations?type=Group") return Response.json({ conversations: [group] });
     if (url === "/api/chat/quick-messages") return Response.json({ items: [] });
     if (url === "/api/chat/mark-read") return Response.json({ ok: true });
     return Response.json({ error: "Unexpected fixture request" }, { status: 404 });
@@ -162,8 +164,40 @@ describe("chat message media", () => {
     });
     render(<ChatPage />);
     await waitFor(() => expect(request).toHaveBeenCalledWith("/api/auth/restore", expect.anything()));
-    expect(request.mock.calls.some(([url]) => url === "/api/chat/conversations" || url === "/api/chat/quick-messages")).toBe(false);
+    expect(request.mock.calls.some(([url]) => url.startsWith("/api/chat/conversations") || url === "/api/chat/quick-messages")).toBe(false);
     await act(async () => restoring.resolve(Response.json({ status: "logged_in" })));
     expect(await screen.findByRole("button", { name: "An" })).toBeDefined();
+  });
+
+  it.each(["User", "Group"] as const)("shows the saved list and the refreshed %s list without waiting for the other", async (firstType) => {
+    const friends = Promise.withResolvers<Response>();
+    const groups = Promise.withResolvers<Response>();
+    mockChatApi({
+      "/api/chat/conversations": () => Response.json({ conversations: [{ ...direct, name: "Bạn đã lưu" }] }),
+      "/api/chat/conversations?type=User": () => friends.promise,
+      "/api/chat/conversations?type=Group": () => groups.promise,
+    });
+    render(<ChatPage />);
+    expect(await screen.findByRole("button", { name: "Bạn đã lưu" })).toBeDefined();
+
+    if (firstType === "Group") {
+      fireEvent.click(screen.getByRole("button", { name: "Nhóm" }));
+      expect(screen.getByRole("status").textContent).toBe("Đang tải nhóm…");
+      await act(async () => groups.resolve(Response.json({ conversations: [group] })));
+      expect(screen.getByRole("button", { name: group.name })).toBeDefined();
+      fireEvent.click(screen.getByRole("button", { name: "Bạn bè" }));
+      expect(screen.getByRole("button", { name: "Bạn đã lưu" })).toBeDefined();
+      await act(async () => friends.resolve(Response.json({ conversations: [direct] })));
+    } else {
+      await act(async () => friends.resolve(Response.json({ conversations: [direct] })));
+      expect(screen.getByRole("button", { name: direct.name })).toBeDefined();
+      fireEvent.click(screen.getByRole("button", { name: "Nhóm" }));
+      expect(screen.getByRole("status").textContent).toBe("Đang tải nhóm…");
+      await act(async () => groups.resolve(Response.json({ conversations: [group] })));
+      expect(screen.getByRole("button", { name: group.name })).toBeDefined();
+      fireEvent.click(screen.getByRole("button", { name: "Bạn bè" }));
+    }
+    expect(screen.getByRole("button", { name: direct.name })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Bạn đã lưu" })).toBeNull();
   });
 });

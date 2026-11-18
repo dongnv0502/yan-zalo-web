@@ -16,60 +16,44 @@ export async function GET(req: NextRequest) {
   }
   const accountId = api.getOwnId();
 
-  // Fetch friends list
-  let friends: Array<{
-    userId: string;
-    zaloName: string;
-    displayName: string;
-    avatar: string;
-  }> = [];
-
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const raw: any[] = await api.getAllFriends();
-    friends = raw.map((u) => ({
-      userId: u.userId ?? u.uid ?? u.id ?? "",
-      zaloName: u.zaloName ?? "",
-      displayName: u.displayName ?? u.dName ?? u.zaloName ?? "(No name)",
-      avatar: u.avatar ?? "",
-    }));
-
-    // Seed conversations with friends so they show up in sidebar
-    for (const f of friends) {
-      if (!f.userId) continue;
-      upsertConversation({
-        id: f.userId,
-        type: "User",
-        name: f.displayName,
-        avatar: f.avatar,
-      }, accountId);
-    }
-  } catch (err) {
-    console.error("[chat/conversations] getAllFriends error:", err);
+  const type = req.nextUrl.searchParams.get("type");
+  if (type !== null && type !== "User" && type !== "Group") {
+    return NextResponse.json({ error: "Invalid conversation type" }, { status: 400 });
   }
 
-  // Fetch groups list and seed them
   try {
-    const groupsRes = await api.getAllGroups();
-    const groupIds = Object.keys(groupsRes.gridVerMap ?? {});
-    if (groupIds.length > 0) {
-      // getGroupInfo accepts array; batch all at once
-      const infoRes = await api.getGroupInfo(groupIds);
-      for (const [groupId, info] of Object.entries(infoRes.gridInfoMap ?? {})) {
+    if (type === "User") {
+      const friends = await api.getAllFriends();
+      for (const friend of friends) {
+        const { userId, uid, id, displayName, dName, zaloName, avatar } = friend as typeof friend & {
+          uid?: string; id?: string; dName?: string;
+        };
+        const friendId = userId ?? uid ?? id;
+        if (!friendId) continue;
         upsertConversation({
-          id: groupId,
-          type: "Group",
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          name: (info as any).name ?? groupId,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          avatar: (info as any).avatar ?? (info as any).avt ?? "",
+          id: friendId,
+          type,
+          name: displayName ?? dName ?? zaloName ?? "(No name)",
+          avatar: avatar ?? "",
         }, accountId);
       }
+    } else if (type === "Group") {
+      const groups = await api.getAllGroups();
+      const groupIds = Object.keys(groups.gridVerMap ?? {});
+      if (groupIds.length > 0) {
+        const info = await api.getGroupInfo(groupIds);
+        for (const [id, group] of Object.entries(info.gridInfoMap ?? {})) {
+          const { name, avt, avatar } = group as typeof group & { avatar?: string };
+          upsertConversation({ id, type, name: name ?? id, avatar: avatar ?? avt ?? "" }, accountId);
+        }
+      }
     }
-  } catch (err) {
-    console.error("[chat/conversations] getAllGroups error:", err);
+  } catch (error) {
+    console.error(`[chat/conversations] ${type} refresh failed:`, error);
+    return NextResponse.json({ error: "Could not refresh conversations" }, { status: 502 });
   }
 
-  const conversations = getConversations(accountId);
-  return NextResponse.json({ conversations, friends }, { headers: { "Cache-Control": "private, no-store" } });
+  return NextResponse.json({ conversations: getConversations(accountId, type ?? undefined) }, {
+    headers: { "Cache-Control": "private, no-store" },
+  });
 }

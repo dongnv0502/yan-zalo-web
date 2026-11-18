@@ -86,7 +86,7 @@ export function getMessages(threadId: string, accountId: string, threadType: Thr
   `).all(accountId, threadType, threadId).reverse().map(row => JSON.parse(String(row.payload)));
 }
 
-export function getConversations(accountId: string): Conversation[] {
+export function getConversations(accountId: string, type?: ThreadType): Conversation[] {
   return database().prepare(`
     SELECT c.thread_id, c.thread_type, c.name, c.avatar, c.unread, m.payload
     FROM chat_conversations c
@@ -96,8 +96,9 @@ export function getConversations(accountId: string): Conversation[] {
           AND thread_type = c.thread_type AND thread_id = c.thread_id
         ORDER BY ts DESC, message_id DESC LIMIT 1
       )
-    WHERE c.account_id = ? ORDER BY m.ts DESC, c.thread_type, c.thread_id
-  `).all(accountId).map(row => ({
+    WHERE c.account_id = ? ${type ? "AND c.thread_type = ?" : ""}
+    ORDER BY m.ts DESC, c.thread_type, c.thread_id
+  `).all(...(type ? [accountId, type] : [accountId])).map(row => ({
     id: String(row.thread_id), type: row.thread_type as ThreadType, name: String(row.name),
     avatar: row.avatar == null ? undefined : String(row.avatar), unread: Number(row.unread),
     lastMessage: row.payload == null ? undefined : JSON.parse(String(row.payload)),
