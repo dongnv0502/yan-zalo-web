@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Image from "next/image";
 import type { Member, GroupData } from "@/types/group";
 
 const PAGE_SIZE_DISPLAY = 20;
@@ -73,21 +74,21 @@ export default function ScanGroupMembersPage() {
   return (
     <div>
       <h1 className="text-xl font-bold text-gray-800 mb-6">
-        🔍 Quét thành viên nhóm
+        Quét thành viên nhóm
       </h1>
 
       {/* Search form */}
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 mb-6">
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 sm:p-6 mb-6">
         <p className="text-sm text-gray-500 mb-4">
           Nhập link nhóm Zalo để lấy danh sách toàn bộ thành viên
         </p>
-        <form onSubmit={handleSearch} className="flex gap-3">
+        <form onSubmit={handleSearch} className="flex flex-col gap-3 sm:flex-row">
           <input
             type="url"
             value={groupLink}
             onChange={(e) => setGroupLink(e.target.value)}
             placeholder="https://zalo.me/g/xxxxxxx"
-            className="flex-1 border border-gray-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent"
+            className="min-w-0 flex-1 border border-gray-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent"
             required
           />
           <button
@@ -103,20 +104,21 @@ export default function ScanGroupMembersPage() {
 
       {/* Group info + results */}
       {groupData && (
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 sm:p-6">
           {/* Group header */}
-          <div className="flex items-center justify-between mb-5">
-            <div className="flex items-center gap-3">
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-3">
               {groupData.avt && (
-                <img
+                <Image
                   src={groupData.avt}
                   alt={groupData.name}
                   width={48}
                   height={48}
-                  className="rounded-full object-cover"
+                  className="size-12 shrink-0 rounded-full object-cover"
+                  unoptimized
                 />
               )}
-              <div>
+              <div className="min-w-0 [overflow-wrap:anywhere]">
                 <h3 className="font-bold text-gray-800">{groupData.name}</h3>
                 <p className="text-sm text-gray-500">
                   {groupData.totalMember} thành viên • {allMembers.length} đã
@@ -124,16 +126,16 @@ export default function ScanGroupMembersPage() {
                 </p>
               </div>
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <button
                 onClick={() => exportFile("csv")}
-                className="text-sm border border-gray-300 hover:bg-gray-50 px-4 py-2 rounded-lg transition-colors"
+                className="min-h-11 text-sm border border-gray-300 hover:bg-gray-50 px-3 py-2 rounded-lg transition-colors"
               >
                 Export CSV
               </button>
               <button
                 onClick={() => exportFile("json")}
-                className="text-sm border border-gray-300 hover:bg-gray-50 px-4 py-2 rounded-lg transition-colors"
+                className="min-h-11 text-sm border border-gray-300 hover:bg-gray-50 px-3 py-2 rounded-lg transition-colors"
               >
                 Export JSON
               </button>
@@ -146,12 +148,13 @@ export default function ScanGroupMembersPage() {
               <div key={member.id} className="flex items-center gap-3 py-3">
                 <div className="flex-shrink-0">
                   {member.avatar ? (
-                    <img
+                    <Image
                       src={member.avatar}
                       alt={member.dName}
                       width={40}
                       height={40}
                       className="rounded-full object-cover w-10 h-10"
+                      unoptimized
                     />
                   ) : (
                     <div className="w-10 h-10 bg-gray-200 rounded-full flex items-center justify-center">
@@ -188,7 +191,7 @@ export default function ScanGroupMembersPage() {
               <button
                 onClick={() => setDisplayPage((p) => Math.max(1, p - 1))}
                 disabled={displayPage === 1}
-                className="px-3 py-1 rounded-lg border border-gray-200 text-sm disabled:opacity-40 hover:bg-gray-50"
+                className="min-h-11 px-3 py-1 rounded-lg border border-gray-200 text-sm disabled:opacity-40 hover:bg-gray-50"
               >
                 ← Trước
               </button>
@@ -200,7 +203,7 @@ export default function ScanGroupMembersPage() {
                   setDisplayPage((p) => Math.min(totalDisplayPages, p + 1))
                 }
                 disabled={displayPage === totalDisplayPages}
-                className="px-3 py-1 rounded-lg border border-gray-200 text-sm disabled:opacity-40 hover:bg-gray-50"
+                className="min-h-11 px-3 py-1 rounded-lg border border-gray-200 text-sm disabled:opacity-40 hover:bg-gray-50"
               >
                 Tiếp →
               </button>

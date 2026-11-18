@@ -2,17 +2,19 @@
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { API } from "zca-js";
-import { getZaloApi, isLoggedIn } from "@/lib/zalo";
+import { getZaloSession } from "@/lib/zalo";
 import { closeMessageStore, upsertConversation } from "@/lib/messageStore";
 import { GET } from "./route";
 
-vi.mock("@/lib/zalo", () => ({ getZaloApi: vi.fn(), isLoggedIn: vi.fn() }));
+vi.mock("@/lib/zalo", () => ({ getZaloSession: vi.fn() }));
 
 const accountId = "account-1";
 const makeRequest = (query = "", sid = "test-sid") => new NextRequest(
   `http://localhost/api/chat/conversations${query}`,
   { headers: { Cookie: `zalo_sid=${sid}` } },
 );
+const authenticate = (api: API, isCurrent = () => true) => vi.mocked(getZaloSession).mockImplementation((sid) =>
+  sid === "test-sid" ? { api, accountId, generation: "fixture", isCurrent } : null);
 
 beforeEach(() => vi.stubEnv("CHAT_DB_PATH", ":memory:"));
 afterEach(() => {
@@ -25,8 +27,7 @@ describe("GET /api/chat/conversations", () => {
   it("returns only the signed-in account's saved list without waiting on Zalo", async () => {
     const friends = Promise.withResolvers<[]>();
     const groups = Promise.withResolvers<{ gridVerMap: Record<string, string> }>();
-    vi.mocked(isLoggedIn).mockImplementation((sid) => sid === "test-sid");
-    vi.mocked(getZaloApi).mockReturnValue({
+    authenticate({
       getOwnId: () => accountId,
       getAllFriends: () => friends.promise,
       getAllGroups: () => groups.promise,
@@ -53,11 +54,10 @@ describe("GET /api/chat/conversations", () => {
   });
 
   it("refreshes each list without querying the other list and persists the result", async () => {
-    vi.mocked(isLoggedIn).mockReturnValue(true);
     const getAllFriends = vi.fn().mockResolvedValue([{ userId: "friend-1", displayName: "An" }]);
     const getAllGroups = vi.fn().mockResolvedValue({ gridVerMap: { "group-1": "1" } });
     const getGroupInfo = vi.fn().mockResolvedValue({ gridInfoMap: { "group-1": { name: "Nhóm thử" } } });
-    vi.mocked(getZaloApi).mockReturnValue({ getOwnId: () => accountId, getAllFriends, getAllGroups, getGroupInfo } as unknown as API);
+    authenticate({ getOwnId: () => accountId, getAllFriends, getAllGroups, getGroupInfo } as unknown as API);
 
     const direct = await GET(makeRequest("?type=User"));
     expect(await direct.json()).toEqual({ conversations: [expect.objectContaining({ id: "friend-1", type: "User", name: "An" })] });
@@ -69,5 +69,19 @@ describe("GET /api/chat/conversations", () => {
     expect(await saved.json()).toEqual({ conversations: [
       expect.objectContaining({ id: "group-1" }), expect.objectContaining({ id: "friend-1" }),
     ] });
+  });
+
+  it("does not return a saved preview after the initiating session changes during refresh", async () => {
+    const friends = Promise.withResolvers<[]>();
+    const api = { getOwnId: () => accountId, getAllFriends: () => friends.promise } as unknown as API;
+    let current = true;
+    authenticate(api, () => current);
+    upsertConversation({ id: "private", name: "Riêng tư", type: "User" }, accountId);
+    const request = GET(makeRequest("?type=User"));
+    current = false;
+    friends.resolve([]);
+    const response = await request;
+    expect(response.status).toBe(401);
+    expect(await response.text()).not.toContain("Riêng tư");
   });
 });

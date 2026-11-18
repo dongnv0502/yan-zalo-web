@@ -1,11 +1,12 @@
 // @vitest-environment node
+import { Readable } from "node:stream";
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GET } from "./route";
 
-const { send, getZaloApi, hasChatMedia } = vi.hoisted(() => ({
+const { send, getZaloSession, hasChatMedia } = vi.hoisted(() => ({
   send: vi.fn(),
-  getZaloApi: vi.fn(),
+  getZaloSession: vi.fn(),
   hasChatMedia: vi.fn(),
 }));
 
@@ -13,11 +14,16 @@ vi.mock("@aws-sdk/client-s3", async (importOriginal) => ({
   ...await importOriginal<Record<string, unknown>>(),
   S3Client: class { send = send; },
 }));
-vi.mock("@/lib/zalo", () => ({ getZaloApi }));
+vi.mock("@/lib/zalo", () => ({ getZaloSession }));
 vi.mock("@/lib/messageStore", () => ({ hasChatMedia }));
 
 const ownedKey = "a".repeat(64);
 const otherKey = "b".repeat(64);
+const mediaRequests = [
+  { kind: "full", range: undefined, contentRange: undefined },
+  { kind: "range", range: "bytes=2-4", contentRange: "bytes 2-4/8" },
+];
+let currentSession: { accountId: string; generation: number } | null;
 
 function request(key: string, sid?: string, range?: string) {
   const headers = new Headers();
@@ -29,10 +35,9 @@ function request(key: string, sid?: string, range?: string) {
 }
 
 function storageBody(content: string) {
-  return {
-    transformToWebStream: () => new Response(content).body!,
-    destroy: vi.fn(),
-  };
+  return Object.assign(Readable.from([Buffer.from(content)]), {
+    transformToWebStream: vi.fn(() => new Response(content).body!),
+  });
 }
 
 beforeEach(() => {
@@ -42,7 +47,13 @@ beforeEach(() => {
   vi.stubEnv("RUSTFS_BUCKET", "chat");
   vi.stubEnv("RUSTFS_ACCESS_KEY_ID", "unit-test-access-key");
   vi.stubEnv("RUSTFS_SECRET_ACCESS_KEY", "unit-test-secret-key");
-  getZaloApi.mockImplementation((sid: string) => sid === "session-2" ? { getOwnId: () => "account-1" } : null);
+  currentSession = { accountId: "account-1", generation: 1 };
+  getZaloSession.mockImplementation((sid: string) => {
+    const session = currentSession;
+    return sid === "session-2" && session
+      ? { ...session, api: {}, isCurrent: () => currentSession === session }
+      : null;
+  });
   hasChatMedia.mockImplementation((accountId: string, key: string) => accountId === "account-1" && key === ownedKey);
 });
 
@@ -105,6 +116,83 @@ describe("GET /api/chat/media/:key", () => {
       input: expect.objectContaining({ Key: ownedKey, Range: objectRange }),
     }), expect.anything());
     expect(await response.text()).toBe(content);
+  });
+
+  it.each(mediaRequests)("rejects a $kind request after the last scoped reference is gone", async ({ range }) => {
+    hasChatMedia.mockImplementation((accountId, key) => accountId === "account-2" && key === ownedKey);
+
+    const response = await request(ownedKey, "session-2", range);
+
+    expect(response.status).toBe(404);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it.each(mediaRequests)("discards a $kind body if the last scoped reference is lost during GetObject", async ({ range, contentRange }) => {
+    const body = storageBody("cde");
+    if (range) send.mockResolvedValueOnce({ ContentLength: 8 });
+    send.mockImplementationOnce(async () => {
+      await Promise.resolve();
+      hasChatMedia.mockImplementation((accountId, key) => accountId === "account-2" && key === ownedKey);
+      return { Body: body, ContentType: "video/mp4", ContentLength: 3, ContentRange: contentRange };
+    });
+
+    const response = await request(ownedKey, "session-2", range);
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("content-range")).toBeNull();
+    expect(body.transformToWebStream).not.toHaveBeenCalled();
+    expect(body.destroyed).toBe(true);
+  });
+
+  it.each([
+    { change: "logout", replacement: null },
+    { change: "same-account relogin", replacement: { accountId: "account-1", generation: 2 } },
+    { change: "account switch", replacement: { accountId: "account-2", generation: 2 } },
+  ])("discards a fetched body after $change even if the media is still referenced", async ({ replacement }) => {
+    const body = storageBody("abc");
+    hasChatMedia.mockImplementation((_accountId, key) => key === ownedKey);
+    send.mockImplementationOnce(async () => {
+      await Promise.resolve();
+      currentSession = replacement;
+      return { Body: body, ContentType: "image/png", ContentLength: 3 };
+    });
+
+    const response = await request(ownedKey, "session-2");
+
+    expect(response.status).toBe(401);
+    expect(body.transformToWebStream).not.toHaveBeenCalled();
+    expect(body.destroyed).toBe(true);
+  });
+
+  it("does not expose the media length if its last reference is lost during HeadObject", async () => {
+    send.mockImplementationOnce(async () => {
+      await Promise.resolve();
+      hasChatMedia.mockReturnValue(false);
+      return { ContentLength: 8 };
+    });
+
+    const response = await request(ownedKey, "session-2", "bytes=8-");
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("content-range")).toBeNull();
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it("serves shared media when another scoped message still references it", async () => {
+    const references = new Set(["message-1", "message-2"]);
+    hasChatMedia.mockImplementation((accountId, key) =>
+      accountId === "account-1" && key === ownedKey && references.size > 0,
+    );
+    send.mockImplementationOnce(async () => {
+      await Promise.resolve();
+      references.delete("message-1");
+      return { Body: storageBody("abc"), ContentType: "image/png", ContentLength: 3 };
+    });
+
+    const response = await request(ownedKey, "session-2");
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("abc");
   });
 
   it.each(["bytes=8-", "bytes=5-2", "bytes=-0", "bytes=0-1,3-4", "nonsense"])("returns the full length on an unsupported or unsatisfiable range %s", async (range) => {

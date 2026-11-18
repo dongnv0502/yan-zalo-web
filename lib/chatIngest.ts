@@ -1,23 +1,33 @@
 import { createHash } from "node:crypto";
-import { ThreadType, type API, type Message } from "zca-js";
+import { ThreadType, type Message } from "zca-js";
 import type { ChatMessage } from "@/types/chat";
 import { archiveUploadedMedia, archiveZaloMedia } from "./chatMedia";
-import { attachChatMedia, hasChatMedia, storeMessage } from "./messageStore";
-import { getSocketServer } from "./socketServer";
+import { attachChatMedia, commitMessage, getChatMessage, hasChatMedia, markMessageRecalled } from "./messageStore";
+import { publishAccountInvalidation, publishSessionEvent } from "./socketServer";
+import type { ZaloSession } from "./zalo";
+import { extractMessageIdentity, extractQuoteMetadata, extractQuotePreview, extractUndoTarget, hasUnverifiedHistoryUndoShape, readProtocolId } from "./chatProtocol";
 
 const pendingMedia = new Map<string, Promise<void>>();
 
-export function publishChatMessage(message: ChatMessage, accountId: string, sessionId: string): void {
-  if (storeMessage(message, accountId)) {
-    getSocketServer()?.to(sessionId).emit("message", message);
-  }
+export function publishChatMessage(message: ChatMessage, session: ZaloSession): ChatMessage | undefined {
+  if (!session.isCurrent()) return;
+  const saved = commitMessage(session.accountId, message, true, {
+    source: "ack", identity: { globalId: message.id, senderId: session.accountId },
+  });
+  if (!saved || saved.message.recalled) return;
+  if (saved.changed) publishSessionEvent(session, "message", saved.message);
+  return saved.message;
 }
 
-export async function ingestZaloMessage(api: API, sessionId: string, incoming: Message, live: boolean): Promise<void> {
-  const accountId = api.getOwnId();
+export async function ingestZaloMessage(session: ZaloSession, incoming: Message, live: boolean): Promise<{ id: string; mergedId?: string } | undefined> {
+  if (!session.isCurrent()) return;
+  const { accountId, api } = session;
   const { data } = incoming;
-  const upstreamId = data.msgId || data.cliMsgId;
-  if (!upstreamId) return;
+  if (hasUnverifiedHistoryUndoShape(incoming)) return;
+  const identity = extractMessageIdentity(incoming);
+  const upstreamId = identity?.globalId ?? identity?.cliId;
+  const threadId = readProtocolId(incoming.threadId);
+  if (!identity || !upstreamId || !threadId) return;
 
   const fields = typeof data.content === "object" && data.content !== null
     ? data.content as Record<string, unknown> : {};
@@ -46,6 +56,7 @@ export async function ingestZaloMessage(api: API, sessionId: string, incoming: M
     mediaType = "video";
     sourceUrl = href;
   }
+  if (data.msgType === "group.poll") mediaType = "poll";
   if (mediaType === "image" || mediaType === "video") {
     content = typeof fields.msg === "string" && fields.msg.trim() ? fields.msg : title.trim();
     if (!content || /^\[(ảnh|video)\]$/i.test(content)) content = mediaType === "image" ? "[Ảnh]" : "[Video]";
@@ -53,49 +64,85 @@ export async function ingestZaloMessage(api: API, sessionId: string, incoming: M
 
   const timestamp = Number(data.ts);
   const message: ChatMessage = {
-    id: String(upstreamId), threadId: String(incoming.threadId),
+    id: upstreamId, threadId,
     threadType: incoming.type === ThreadType.Group ? "Group" : "User",
-    fromId: String(data.uidFrom ?? ""), fromName: data.dName || String(data.uidFrom ?? ""),
+    fromId: identity.senderId, fromName: data.dName || identity.senderId,
     ts: Number.isSafeInteger(timestamp) && timestamp > 0 ? timestamp : Date.now(),
     isSelf: incoming.isSelf ?? String(data.uidFrom) === accountId,
     content,
-    ...(data.cliMsgId && { cliMsgId: String(data.cliMsgId) }),
     ...(mediaType && { mediaType }),
     ...(mediaUrl && { mediaUrl }),
   };
-  if (live) publishChatMessage(message, accountId, sessionId);
-  else storeMessage(message, accountId, false);
+  if (!session.isCurrent()) return;
+  message.quote = extractQuotePreview(incoming);
+  const saved = commitMessage(accountId, message, live, {
+    identity, source: "echo", quote: extractQuoteMetadata(incoming),
+    ...(message.quote?.targetId && { quoteTarget: { id: message.quote.targetId } }),
+  });
+  if (!saved) return;
+  if (saved.message.recalled) {
+    if (saved.changed) {
+      publishAccountInvalidation(session, { threadId, threadType: message.threadType, messageId: saved.message.id });
+      if (saved.mergedId) publishAccountInvalidation(session, { threadId, threadType: message.threadType, messageId: saved.mergedId });
+    }
+    return { id: saved.message.id, mergedId: saved.mergedId };
+  }
+  if ((live || saved.mergedId) && saved.changed) {
+    const options = saved.message.id !== message.id || saved.mergedId
+      ? { mediaUpdate: true as const, mergedId: saved.mergedId } : undefined;
+    publishSessionEvent(session, "message", saved.message, options);
+  }
 
   if (sourceUrl && (mediaType === "image" || mediaType === "video")) {
     const url = sourceUrl;
     const type = mediaType;
-    await saveChatMedia(accountId, sessionId, message, key => archiveZaloMedia(url, type, key));
+    await saveChatMedia(session, saved.message, key => archiveZaloMedia(url, type, key));
   }
+  return { id: saved.message.id, mergedId: saved.mergedId };
+}
+
+export function ingestZaloUndo(session: ZaloSession, event: unknown): void {
+  if (!session.isCurrent()) return;
+  const target = extractUndoTarget(event);
+  if (!target) return;
+  const result = markMessageRecalled(session.accountId, target);
+  if (!result?.changed) return;
+  if (result.hasLocalTarget !== false) publishAccountInvalidation(session, { ...target, messageId: result.messageId });
+  if (result.hasLocalTarget === false || result.messageId !== target.messageId) publishAccountInvalidation(session, { ...target, namespace: "global" });
 }
 
 export async function saveUploadedChatMedia(
-  accountId: string, sessionId: string, message: ChatMessage, bytes: Buffer,
+  session: ZaloSession, message: ChatMessage, bytes: Buffer,
   contentType: string, mediaType: "image" | "video",
 ): Promise<void> {
-  await saveChatMedia(accountId, sessionId, message, key => archiveUploadedMedia(bytes, contentType, mediaType, key));
+  await saveChatMedia(session, message, key => archiveUploadedMedia(bytes, contentType, mediaType, key));
 }
 
 async function saveChatMedia(
-  accountId: string, sessionId: string, msg: ChatMessage, upload: (key: string) => Promise<void>,
+  session: ZaloSession, msg: ChatMessage, upload: (key: string) => Promise<void>,
 ): Promise<void> {
+  const { accountId } = session;
   const key = createHash("sha256").update(JSON.stringify([accountId, msg.threadType, msg.threadId, msg.id])).digest("hex");
-  if (hasChatMedia(accountId, key)) return;
+  const target = { threadId: msg.threadId, threadType: msg.threadType, messageId: msg.id };
+  const noLongerNeeded = () => {
+    if (!session.isCurrent()) return true;
+    const saved = getChatMessage(accountId, target);
+    return !saved || saved.recalled || hasChatMedia(accountId, key);
+  };
+  if (noLongerNeeded()) return;
   while (pendingMedia.has(key)) {
     const pending = pendingMedia.get(key)!;
     await pending;
-    if (hasChatMedia(accountId, key)) return;
+    if (noLongerNeeded()) return;
   }
   // Both the send response and the Zalo socket can report the same message.
   const archive = Promise.resolve().then(async () => {
     try {
+      if (noLongerNeeded()) return;
       await upload(key);
+      if (!session.isCurrent()) return;
       const saved = attachChatMedia(accountId, msg, key);
-      if (saved) getSocketServer()?.to(sessionId).emit("message", saved, { mediaUpdate: true });
+      if (saved) publishSessionEvent(session, "message", saved, { mediaUpdate: true });
     } catch {
       console.warn("[chat] Không lưu được ảnh/video vào RustFS");
     }

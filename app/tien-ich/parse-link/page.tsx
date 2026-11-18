@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import Image from "next/image";
+import { ExternalLink } from "lucide-react";
 import type { ParseLinkResult } from "@/types/utilities";
 
 export default function ParseLinkPage() {
@@ -48,14 +49,14 @@ export default function ParseLinkPage() {
       </p>
 
       {/* Input form */}
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 mb-6 max-w-2xl">
-        <form onSubmit={handleSubmit} className="flex gap-3">
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 sm:p-6 mb-6 max-w-2xl">
+        <form onSubmit={handleSubmit} className="flex flex-col gap-3 sm:flex-row">
           <input
             type="url"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             placeholder="https://..."
-            className="flex-1 border border-gray-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent"
+            className="min-w-0 flex-1 border border-gray-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent"
             required
           />
           <button
@@ -85,7 +86,7 @@ export default function ParseLinkPage() {
             </div>
           )}
 
-          <div className="p-6">
+          <div className="p-4 [overflow-wrap:anywhere] sm:p-6">
             {d.title && (
               <h2 className="font-bold text-gray-800 text-base mb-1 leading-snug">
                 {d.title}
@@ -105,20 +106,7 @@ export default function ParseLinkPage() {
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1.5 text-blue-500 hover:text-blue-700 text-sm font-medium transition-colors"
               >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  className="w-4 h-4"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-                  <polyline points="15 3 21 3 21 9" />
-                  <line x1="10" y1="14" x2="21" y2="3" />
-                </svg>
+                <ExternalLink aria-hidden="true" className="w-4 h-4" />
                 Mở liên kết gốc
               </a>
             )}
@@ -148,7 +136,7 @@ export default function ParseLinkPage() {
                         href={d.media.streamUrl}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-blue-500 hover:underline truncate"
+                        className="min-w-0 text-blue-500 hover:underline truncate"
                       >
                         {d.media.streamUrl}
                       </a>

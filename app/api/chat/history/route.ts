@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getZaloApi, isLoggedIn } from "@/lib/zalo";
+import { getZaloSession } from "@/lib/zalo";
 import { ingestZaloMessage } from "@/lib/chatIngest";
-import { getMessages } from "@/lib/messageStore";
+import { getChatMessage } from "@/lib/messageStore";
+import type { ChatMessage } from "@/types/chat";
 
 export async function GET(req: NextRequest) {
   const sid = req.cookies.get("zalo_sid")?.value ?? "";
-  if (!sid || !isLoggedIn(sid)) {
+  const session = getZaloSession(sid);
+  if (!session) {
     return NextResponse.json({ error: "Not logged in" }, { status: 401 });
   }
 
@@ -19,17 +21,27 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "count must be between 1 and 50" }, { status: 400 });
   }
 
-  const api = getZaloApi(sid)!;
-
   try {
-    const result = await api.getGroupChatHistory(groupId, count);
+    const result = await session.api.getGroupChatHistory(groupId, count);
     const upstream = (result.groupMsgs ?? []).filter(message => message.threadId === groupId);
+    const importedIds = new Set<string>();
+    const replacements: { id: string; mergedId: string }[] = [];
     for (let start = 0; start < upstream.length; start += 4) {
-      await Promise.all(upstream.slice(start, start + 4).map(message => ingestZaloMessage(api, sid, message, false)));
+      const batch = await Promise.all(upstream.slice(start, start + 4).map(message => ingestZaloMessage(session, message, false)));
+      for (const item of batch) {
+        if (!item) continue;
+        importedIds.add(item.id);
+        if (item.mergedId) replacements.push({ id: item.id, mergedId: item.mergedId });
+      }
     }
-    const importedIds = new Set(upstream.map(({ data }) => String(data.msgId || data.cliMsgId)));
-    const messages = getMessages(groupId, api.getOwnId(), "Group").filter(message => importedIds.has(message.id));
-    return NextResponse.json({ messages, more: result.more }, { headers: { "Cache-Control": "private, no-store" } });
+    if (!session.isCurrent()) return NextResponse.json({ error: "Not logged in" }, { status: 401 });
+    const committed = new Map<string, ChatMessage>();
+    for (const messageId of importedIds) {
+      const message = getChatMessage(session.accountId, { threadId: groupId, threadType: "Group", messageId });
+      if (message) committed.set(message.id, message);
+    }
+    const messages = [...committed.values()].sort((left, right) => left.ts - right.ts || Buffer.compare(Buffer.from(left.id), Buffer.from(right.id)));
+    return NextResponse.json({ messages, more: result.more, ...(replacements.length && { replacements }) }, { headers: { "Cache-Control": "private, no-store" } });
   } catch {
     return NextResponse.json({ error: "Failed to load history" }, { status: 502 });
   }

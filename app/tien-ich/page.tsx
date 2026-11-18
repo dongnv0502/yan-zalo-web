@@ -1,14 +1,15 @@
 import { Wrench } from "lucide-react";
+import { ToolDirectory } from "./tool-directory";
 
 export default function TienIchPage() {
   return (
-    <div className="flex flex-col items-center justify-center h-full min-h-[400px] text-center">
-      <Wrench className="w-12 h-12 text-gray-400 mb-4" />
-      <h2 className="text-xl font-bold text-gray-700 mb-2">Khu vực Tiện ích</h2>
-      <p className="text-gray-400 text-sm max-w-xs">
-        Chọn một tiện ích từ thanh bên để bắt đầu. Các tính năng này không có
-        trong ứng dụng Zalo chính thức.
-      </p>
+    <div className="md:flex md:min-h-[400px] md:flex-col md:items-center md:justify-center md:text-center">
+      <Wrench aria-hidden="true" className="hidden w-12 h-12 text-gray-400 mb-4 md:block" />
+      <h1 className="mb-1 text-xl font-bold text-gray-800 md:mb-2">Tiện ích</h1>
+      <p className="text-sm text-gray-600 md:max-w-xs">Chọn một tiện ích để bắt đầu.</p>
+      <div className="mt-4 md:hidden">
+        <ToolDirectory />
+      </div>
     </div>
   );
 }

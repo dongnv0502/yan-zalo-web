@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getZaloApi } from "@/lib/zalo";
-import { getMessages } from "@/lib/messageStore";
+import { getMessages, getMessageAroundWindow } from "@/lib/messageStore";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +19,22 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "threadId and threadType are required" }, { status: 400 });
   }
 
-  const messages = getMessages(threadId, api.getOwnId(), threadType);
-  return NextResponse.json({ messages }, { headers: { "Cache-Control": "private, no-store" } });
+  const around = searchParams.get("around");
+  if (around !== null && !around.trim()) {
+    return NextResponse.json({ error: "around must be a message ID" }, { status: 400 });
+  }
+
+  const headers = { "Cache-Control": "private, no-store" };
+  try {
+    const accountId = api.getOwnId();
+    const result = around === null
+      ? { messages: getMessages(threadId, accountId, threadType) }
+      : getMessageAroundWindow(threadId, accountId, threadType, around);
+    if (!result) {
+      return NextResponse.json({ error: "Message not found" }, { status: 404, headers });
+    }
+    return NextResponse.json(result, { headers });
+  } catch {
+    return NextResponse.json({ error: "Failed to load messages" }, { status: 500, headers });
+  }
 }

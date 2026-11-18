@@ -15,6 +15,8 @@ vi.mock("socket.io-client", () => ({
     on: (event: string, listener: (payload: ChatMessage, options?: { mediaUpdate: boolean }) => void) => socketHandlers.set(event, listener),
     off: (event: string) => socketHandlers.delete(event),
     disconnect: vi.fn(),
+    connect: () => socketHandlers.get("connect")?.({} as ChatMessage),
+    timeout: () => ({ emit: (_event: string, reply: (error: null, data: { ok: boolean }) => void) => reply(null, { ok: true }) }),
   }),
 }));
 
@@ -63,6 +65,229 @@ describe("chat message media", () => {
     socketHandlers.clear();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("returns to the conversation list from the Chat tab without leaving the page", async () => {
+    mockChatApi({
+      [`/api/chat/messages?threadId=${direct.id}&threadType=User`]: () => Response.json({ messages: [] }),
+    });
+    render(<ChatPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "An" }));
+    await screen.findByRole("textbox", { name: "Nội dung tin nhắn" });
+
+    const navigation = screen.getByRole("navigation", { name: "Điều hướng di động" });
+    const chat = within(navigation).getByRole("link", { name: "Chat", current: "page" });
+    expect(within(navigation).getByRole("link", { name: "Tiện ích" }).getAttribute("href")).toBe("/tien-ich");
+    fireEvent.click(chat);
+
+    expect(screen.queryByRole("textbox", { name: "Nội dung tin nhắn" })).toBeNull();
+    expect(screen.getByRole("button", { name: "An" })).toBeTruthy();
+  });
+
+  it("sends a reaction through message actions without hover", async () => {
+    const original = message({ content: "Tin để thả cảm xúc" });
+    const request = mockChatApi({
+      [`/api/chat/messages?threadId=${direct.id}&threadType=User`]: () => Response.json({ messages: [original] }),
+      "/api/chat/reaction": () => Response.json({ ok: true }),
+    });
+    render(<ChatPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "An" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Thao tác tin nhắn" }));
+    fireEvent.click(screen.getByRole("button", { name: "Thả cảm xúc 👍" }));
+
+    const reaction = request.mock.calls.find(([url]) => url === "/api/chat/reaction");
+    expect(reaction?.[1]?.method).toBe("POST");
+    expect(JSON.parse(String(reaction?.[1]?.body))).toMatchObject({ messageId: original.id, icon: ":>" });
+  });
+
+  it("jumps with Enter and discards a late previous-result jump after returning to latest", async () => {
+    const first = message({ id: "old-a", content: "Điện báo", ts: 1 });
+    const second = message({ id: "old-b", content: "Điện thoại", ts: 2 });
+    const latest = message({ id: "latest", content: "Tin mới", ts: 300 });
+    const base = `/api/chat/messages?threadId=${direct.id}&threadType=User`;
+    const { promise: pending, resolve: resolveOld } = Promise.withResolvers<Response>();
+    const request = mockChatApi({
+      [base]: () => Response.json({ messages: [latest] }),
+      [`${base}&around=${second.id}`]: () => Response.json({ messages: [second] }),
+      [`${base}&around=${first.id}`]: () => pending,
+      "/api/chat/search": () => Response.json({ results: [second, first].map((item) => ({
+        id: item.id, fromName: item.fromName, ts: item.ts, excerpt: item.content,
+      })), hasMore: false }),
+    });
+    render(<ChatPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "An" }));
+    await within(screen.getByRole("main")).findByText("Tin mới");
+    fireEvent.click(screen.getByRole("button", { name: "Tìm tin nhắn" }));
+    const input = screen.getByRole("searchbox", { name: "Lịch sử đã lưu" });
+    fireEvent.change(input, { target: { value: "điện" } });
+    await screen.findByText("1/2");
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(screen.getAllByText("Điện", { selector: "mark" })).toHaveLength(2));
+    expect(screen.queryByText("Tin mới")).toBeNull();
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    await waitFor(() => expect(request.mock.calls.some(([url]) => url.endsWith("around=old-a"))).toBe(true));
+    fireEvent.click(screen.getByRole("button", { name: "Về tin mới nhất" }));
+    await act(async () => resolveOld(Response.json({ messages: [first] })));
+    expect(within(screen.getByRole("main")).getByText("Tin mới")).toBeTruthy();
+  });
+
+  it("preserves the draft and quote on a failed send", async () => {
+    const original = { ...message({ content: "Tin gốc" }), canReply: true };
+    const base = `/api/chat/messages?threadId=${direct.id}&threadType=User`;
+    const request = mockChatApi({
+      [base]: () => Response.json({ messages: [original] }),
+      "/api/chat/send": () => Response.json({ error: "Không gửi được" }, { status: 502 }),
+    });
+    render(<ChatPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "An" }));
+    await screen.findByText("Tin gốc");
+    const input = screen.getByRole("textbox", { name: "Nội dung tin nhắn" });
+    fireEvent.change(input, { target: { value: "Nháp chưa gửi" } });
+    fireEvent.click(screen.getByRole("button", { name: "Thao tác tin nhắn" }));
+    fireEvent.click(screen.getByRole("button", { name: "Trả lời" }));
+    expect(document.activeElement).toBe(input);
+    fireEvent.keyDown(input, { key: "Enter" });
+    await screen.findByRole("alert");
+    const send = request.mock.calls.find(([url]) => url === "/api/chat/send");
+    expect(JSON.parse(String(send?.[1]?.body))).toMatchObject({ replyToId: original.id, text: "Nháp chưa gửi" });
+    expect((input as HTMLTextAreaElement).value).toBe("Nháp chưa gửi");
+    expect(screen.getByRole("button", { name: "Bỏ trích dẫn" })).toBeTruthy();
+  });
+
+  it("never restores content or a reply excerpt when recall arrives before a stale snapshot", async () => {
+    const source = message({ id: "source", content: "Riêng tư" });
+    const reply = { ...message({ id: "reply", content: "Đã đọc", ts: 2 }), quote: { targetId: source.id, text: source.content } };
+    const delayed = Promise.withResolvers<Response>();
+    const base = `/api/chat/messages?threadId=${direct.id}&threadType=User`;
+    const request = mockChatApi({ [base]: () => delayed.promise });
+    render(<ChatPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "An" }));
+    await waitFor(() => expect(request.mock.calls.some(([url]) => url === base)).toBe(true));
+    await act(async () => socketHandlers.get("message_recalled")?.({
+      threadId: direct.id, threadType: direct.type, messageId: source.id,
+    } as unknown as ChatMessage));
+    await act(async () => delayed.resolve(Response.json({ messages: [source, reply] })));
+    expect(await screen.findByText("Đã đọc")).toBeTruthy();
+    expect(screen.queryAllByText("Riêng tư")).toHaveLength(0);
+    expect(screen.getAllByText("Tin nhắn đã được thu hồi")).toHaveLength(2);
+  });
+
+  it("conceals disconnected content when the resync snapshot fails", async () => {
+    const previous = message({ content: "Chỉ thấy trước khi rớt mạng" });
+    const reconnect = Promise.withResolvers<Response>();
+    let calls = 0;
+    mockChatApi({
+      [`/api/chat/messages?threadId=${direct.id}&threadType=User`]: () => ++calls === 1
+        ? Response.json({ messages: [previous] }) : reconnect.promise,
+    });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    render(<ChatPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "An" }));
+    await screen.findByText(previous.content);
+    await act(async () => socketHandlers.get("disconnect")?.(previous));
+    expect(screen.queryByText(previous.content)).toBeNull();
+    await act(async () => socketHandlers.get("connect")?.(previous));
+    await waitFor(() => expect(calls).toBe(2));
+    await act(async () => reconnect.resolve(Response.json({}, { status: 500 })));
+    expect(await screen.findByText("Không thể đồng bộ lịch sử đã lưu.")).toBeTruthy();
+    expect(screen.queryByText(previous.content)).toBeNull();
+  });
+
+  it("discards a delayed search response after switching between scopes with the same thread ID", async () => {
+    const pending = Promise.withResolvers<Response>();
+    const request = mockChatApi({
+      "/api/chat/search": () => pending.promise,
+      [`/api/chat/messages?threadId=${direct.id}&threadType=User`]: () => Response.json({ messages: [message({ content: "Tin bạn bè" })] }),
+      [`/api/chat/messages?threadId=${group.id}&threadType=Group`]: () => Response.json({ messages: [message({ threadType: "Group", content: "Tin nhóm" })] }),
+      [`/api/chat/history?groupId=${group.id}&count=50`]: () => Response.json({ messages: [] }),
+    });
+    render(<ChatPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "An" }));
+    await screen.findByText("Tin bạn bè");
+    fireEvent.click(screen.getByRole("button", { name: "Tìm tin nhắn" }));
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "riêng" } });
+    await waitFor(() => expect(request.mock.calls.some(([url]) => url === "/api/chat/search")).toBe(true));
+    fireEvent.click(screen.getByRole("button", { name: "Nhóm" }));
+    fireEvent.click(screen.getByRole("button", { name: "Nhóm thử" }));
+    await screen.findByText("Tin nhóm");
+    fireEvent.click(screen.getByRole("button", { name: "Tìm tin nhắn" }));
+    await act(async () => pending.resolve(Response.json({ results: [{ id: "other", excerpt: "Riêng cho bạn bè", ts: 1 }], hasMore: false })));
+    expect((screen.getByRole("searchbox") as HTMLInputElement).value).toBe("");
+    expect(screen.queryByText("Riêng cho bạn bè")).toBeNull();
+  });
+
+  it.each([false, true])("keeps SQLite BINARY preview ordering at a tied timestamp (live first: %s)", async (liveFirst) => {
+    const snapshot = Promise.withResolvers<Response>();
+    const older = message({ id: "Z", content: "Tin Z", ts: 10 });
+    const newer = message({ id: "a", content: "Tin a", ts: 10 });
+    const request = mockChatApi({
+      "/api/chat/conversations?type=User": () => snapshot.promise,
+      [`/api/chat/messages?threadId=${direct.id}&threadType=User`]: () => Response.json({ messages: [newer, older] }),
+    });
+    render(<ChatPage />);
+    await screen.findByRole("button", { name: "An" });
+    await waitFor(() => expect(request.mock.calls.some(([url]) => url.endsWith("type=User"))).toBe(true));
+    if (liveFirst) await emitMessage(newer);
+    await act(async () => snapshot.resolve(Response.json({ conversations: [{ ...direct, lastMessage: older }] })));
+    if (!liveFirst) await emitMessage(newer);
+    const conversation = await screen.findByRole("button", { name: /An.*Tin a/ });
+    fireEvent.click(conversation);
+    const main = within(screen.getByRole("main"));
+    const first = await main.findByText("Tin Z");
+    expect(first.compareDocumentPosition(main.getByText("Tin a")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it.each([true, false])("does not replace a newer draft after switching A → B → A (ACK succeeds: %s)", async (success) => {
+    const receipt = Promise.withResolvers<Response>();
+    const original = { ...message({ content: "Nội dung gốc" }), canReply: true };
+    const own = message({ id: "sent", content: "Nháp đã gửi", isSelf: true, ts: 2 });
+    const request = mockChatApi({
+      [`/api/chat/messages?threadId=${direct.id}&threadType=User`]: () => Response.json({ messages: [original] }),
+      [`/api/chat/messages?threadId=${group.id}&threadType=Group`]: () => Response.json({ messages: [] }),
+      [`/api/chat/history?groupId=${group.id}&count=50`]: () => Response.json({ messages: [] }),
+      "/api/chat/send": () => receipt.promise,
+    });
+    render(<ChatPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "An" }));
+    await screen.findByText(original.content);
+    const composer = () => screen.getByRole("textbox", { name: "Nội dung tin nhắn" }) as HTMLTextAreaElement;
+    fireEvent.click(screen.getByRole("button", { name: "Thao tác tin nhắn" }));
+    fireEvent.click(screen.getByRole("button", { name: "Trả lời" }));
+    fireEvent.change(composer(), { target: { value: own.content } });
+    fireEvent.keyDown(composer(), { key: "Enter" });
+    await waitFor(() => expect(request.mock.calls.some(([url]) => url === "/api/chat/send")).toBe(true));
+    fireEvent.click(screen.getByRole("button", { name: "Nhóm" }));
+    fireEvent.click(screen.getByRole("button", { name: "Nhóm thử" }));
+    fireEvent.change(composer(), { target: { value: "Nháp ở nhóm" } });
+    fireEvent.click(screen.getByRole("button", { name: "Bạn bè" }));
+    fireEvent.click(screen.getByRole("button", { name: "An" }));
+    fireEvent.change(composer(), { target: { value: "Nháp mới" } });
+    await act(async () => receipt.resolve(success ? Response.json({ message: own }) : Response.json({ error: "Từ chối" }, { status: 502 })));
+    expect(composer().value).toBe("Nháp mới");
+    expect(screen.getByRole("button", { name: "Bỏ trích dẫn" })).toBeTruthy();
+    expect(screen.queryByText("Từ chối")).toBeNull();
+    if (success) {
+      await emitMessage(own);
+      expect(within(screen.getByRole("main")).getAllByText(own.content)).toHaveLength(1);
+    }
+  });
+
+  it("retains an owned message and reports an explicit refusal to recall it", async () => {
+    const own = { ...message({ content: "Không thể thu hồi", isSelf: true }), canRecall: true };
+    const request = mockChatApi({
+      [`/api/chat/messages?threadId=${direct.id}&threadType=User`]: () => Response.json({ messages: [own] }),
+      "/api/chat/recall": () => Response.json({ error: "Zalo từ chối" }, { status: 422 }),
+    });
+    vi.spyOn(globalThis, "confirm").mockReturnValue(true);
+    render(<ChatPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "An" }));
+    await screen.findByText(own.content);
+    fireEvent.click(screen.getByRole("button", { name: "Thao tác tin nhắn" }));
+    fireEvent.click(screen.getByRole("button", { name: "Thu hồi" }));
+    expect(await screen.findByText("Zalo từ chối")).toBeTruthy();
+    expect(within(screen.getByRole("main")).getByText(own.content)).toBeTruthy();
+    expect(screen.queryByText("Tin nhắn đã được thu hồi")).toBeNull();
+    expect(request.mock.calls.filter(([url]) => url === "/api/chat/recall")).toHaveLength(1);
   });
 
   it("renders archived photos and playable videos with captions, and handles unavailable media", async () => {

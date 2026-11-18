@@ -1,7 +1,9 @@
-import { Zalo, API, LoginQRCallbackEventType } from "zca-js";
-import { getSocketServer } from "./socketServer";
+import { randomUUID } from "node:crypto";
+import { Zalo, type API, LoginQRCallbackEventType } from "zca-js";
+import { publishSessionEvent, revokeSessionSockets } from "./socketServer";
 import { updateMessageReaction } from "./messageStore";
-import { ingestZaloMessage } from "./chatIngest";
+import { ingestZaloMessage, ingestZaloUndo } from "./chatIngest";
+import { readProtocolId } from "./chatProtocol";
 
 export type LoginStatus = "idle" | "qr_generated" | "logged_in" | "error";
 
@@ -30,18 +32,27 @@ function getEventStore(sessionId: string): GroupEventLog[] {
 }
 
 export function getGroupEvents(sessionId: string): GroupEventLog[] {
-  return [...getEventStore(sessionId)];
+  return [...(global.__zaloGroupEvents?.get(sessionId) ?? [])];
 }
 
 export function clearGroupEvents(sessionId: string): void {
-  if (global.__zaloGroupEvents) global.__zaloGroupEvents.set(sessionId, []);
+  global.__zaloGroupEvents?.delete(sessionId);
+}
+
+export interface ZaloSession {
+  readonly api: API;
+  readonly accountId: string;
+  readonly generation: string;
+  isCurrent(): boolean;
 }
 
 interface ZaloState {
   status: LoginStatus;
-  api: API | null;
+  session: ZaloSession | null;
   error: string | null;
   qrImageBase64: string | null;
+  cancelQR?: () => void;
+  restoring?: Promise<boolean>;
 }
 
 declare global {
@@ -54,40 +65,36 @@ function getSessionMap(): Map<string, ZaloState> {
   return global.__zaloSessions;
 }
 
-function getState(sessionId: string): ZaloState {
-  const map = getSessionMap();
-  if (!map.has(sessionId)) {
-    map.set(sessionId, { status: "idle", api: null, error: null, qrImageBase64: null });
-  }
-  return map.get(sessionId)!;
+export function getLoginStatus(sessionId: string): LoginStatus {
+  return global.__zaloSessions?.get(sessionId)?.status ?? "idle";
 }
 
-export function getLoginStatus(sessionId: string): LoginStatus {
-  return getState(sessionId).status;
+export function getZaloSession(sessionId: string): ZaloSession | null {
+  return global.__zaloSessions?.get(sessionId)?.session ?? null;
 }
 
 export function getZaloApi(sessionId: string): API | null {
-  return getState(sessionId).api;
+  return getZaloSession(sessionId)?.api ?? null;
 }
 
 export function isLoggedIn(sessionId: string): boolean {
-  return getState(sessionId).status === "logged_in";
+  return getZaloSession(sessionId) !== null;
 }
 
 export function getLoginError(sessionId: string): string | null {
-  return getState(sessionId).error;
+  return global.__zaloSessions?.get(sessionId)?.error ?? null;
 }
 
 export function getQRImageBase64(sessionId: string): string | null {
-  return getState(sessionId).qrImageBase64;
+  return global.__zaloSessions?.get(sessionId)?.qrImageBase64 ?? null;
 }
 
 export function getSessionForClient(sessionId: string): { imei: string; userAgent: string; cookies: unknown[] } | null {
-  const state = getState(sessionId);
-  if (state.status !== "logged_in" || !state.api) return null;
+  const api = getZaloApi(sessionId);
+  if (!api) return null;
   try {
-    const ctx = state.api.getContext();
-    const cookieJar = state.api.getCookie();
+    const ctx = api.getContext();
+    const cookieJar = api.getCookie();
     const cookies = (cookieJar.toJSON() as { cookies: unknown[] }).cookies;
     return { imei: ctx.imei, userAgent: ctx.userAgent, cookies };
   } catch {
@@ -95,75 +102,120 @@ export function getSessionForClient(sessionId: string): { imei: string; userAgen
   }
 }
 
-export async function restoreFromSession(
-  data: { imei: string; userAgent: string; cookies: unknown[] },
-  sessionId: string
-): Promise<boolean> {
-  const state = getState(sessionId);
-  if (state.status === "logged_in") return true;
+function activateSession(sessionId: string, state: ZaloState, api: API): boolean {
+  if (global.__zaloSessions?.get(sessionId) !== state) return false;
+  const accountId = api.getOwnId();
+  if (typeof accountId !== "string" || !accountId) return false;
+  const session: ZaloSession = {
+    api, accountId, generation: randomUUID(),
+    isCurrent: () => global.__zaloSessions?.get(sessionId)?.session === session,
+  };
+  state.session = session;
   try {
-    const { imei, userAgent, cookies } = data;
-    if (!imei || !userAgent || !Array.isArray(cookies)) return false;
-    const zalo = new Zalo({ selfListen: true, checkUpdate: false, logging: false });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const api: API = await zalo.login({ cookie: cookies as any, imei, userAgent });
-    state.api = api;
-    state.status = "logged_in";
-    state.error = null;
-    wireMessageListener(api, sessionId);
+    wireMessageListener(session, sessionId);
+    // The SDK's queued retry calls listener.start() even after stop(). Guard the public
+    // entry point so a stale retry cannot reopen the upstream listener after logout.
+    const start = api.listener.start.bind(api.listener);
+    api.listener.start = options => {
+      if (session.isCurrent()) start(options);
+    };
     api.listener.start({ retryOnClose: true });
-    console.log("[zalo] Restored session from client.", sessionId);
+    state.status = "logged_in";
+    state.qrImageBase64 = null;
     return true;
-  } catch (err) {
-    console.error("[zalo] Session restore failed:", err);
+  } catch {
+    state.session = null;
+    stopListener(api);
     return false;
   }
 }
 
-export async function startQRLogin(sessionId: string): Promise<void> {
-  const state = getState(sessionId);
+function stopListener(api: API): void {
+  try {
+    api.listener.stop();
+  } catch {
+    console.error("[zalo] Không dừng được trình nghe sự kiện");
+  }
+}
 
-  if (state.status === "logged_in") return;
-  if (state.status === "qr_generated") return;
+export async function restoreFromSession(data: unknown, sessionId: string): Promise<boolean> {
+  if (getZaloSession(sessionId)) return true;
+  if (!data || typeof data !== "object") return false;
+  const { imei, userAgent, cookies } = data as Record<string, unknown>;
+  if (typeof imei !== "string" || !imei || typeof userAgent !== "string" || !userAgent || !Array.isArray(cookies) ||
+    !cookies.every(cookie => cookie && typeof cookie === "object" && !Array.isArray(cookie))) return false;
 
-  state.status = "qr_generated";
-  state.error = null;
+  const previous = global.__zaloSessions?.get(sessionId);
+  if (previous?.restoring) return previous.restoring;
+  const state: ZaloState = { status: "idle", session: null, error: null, qrImageBase64: null };
+  getSessionMap().set(sessionId, state);
+  previous?.cancelQR?.();
 
-  const zalo = new Zalo({
-    selfListen: true,
-    checkUpdate: false,
-    logging: true,
+  const restoring = Promise.resolve().then(async () => {
+    if (global.__zaloSessions?.get(sessionId) !== state) return false;
+    try {
+      const zalo = new Zalo({ selfListen: true, checkUpdate: false, logging: false });
+      const api = await zalo.login({ cookie: cookies as Parameters<Zalo["login"]>[0]["cookie"], imei, userAgent });
+      if (activateSession(sessionId, state, api)) return true;
+    } catch {
+      if (global.__zaloSessions?.get(sessionId) === state) console.error("[zalo] Không khôi phục được phiên");
+    } finally {
+      delete state.restoring;
+    }
+    if (global.__zaloSessions?.get(sessionId) === state) global.__zaloSessions.delete(sessionId);
+    return false;
   });
+  state.restoring = restoring;
+  return restoring;
+}
 
-  const qrTimeout = new Promise<never>((_, reject) =>
-    setTimeout(
-      () => reject(new Error("QR login timeout: không thể kết nối đến máy chủ Zalo (id.zalo.me)")),
-      30_000
-    )
-  );
+export async function startQRLogin(sessionId: string): Promise<void> {
+  const status = getLoginStatus(sessionId);
+  if (status === "logged_in" || status === "qr_generated") return;
 
-  // Run login in background — resolves when user scans QR
-  Promise.race([
-    zalo.loginQR({}, (event) => {
-      if (event.type === LoginQRCallbackEventType.QRCodeGenerated) {
-        state.qrImageBase64 = event.data.image;
+  const state: ZaloState = { status: "qr_generated", session: null, error: null, qrImageBase64: null };
+  getSessionMap().set(sessionId, state);
+
+  // QR login runs in the background while the browser polls for the image and status.
+  void finishQRLogin(sessionId, state);
+}
+
+async function finishQRLogin(sessionId: string, state: ZaloState): Promise<void> {
+  const { promise: cancelled, reject } = Promise.withResolvers<never>();
+  const timeout = setTimeout(() => reject(new Error("QR login timed out")), 30_000);
+  let abort: (() => unknown) | undefined;
+  let cancelledAttempt = false;
+  state.cancelQR = () => {
+    cancelledAttempt = true;
+    reject(new Error("QR login cancelled"));
+    abort?.();
+  };
+
+  const isActive = () => !cancelledAttempt && global.__zaloSessions?.get(sessionId) === state;
+  try {
+    const zalo = new Zalo({ selfListen: true, checkUpdate: false, logging: false });
+    const login = zalo.loginQR({}, event => {
+      if (!isActive()) {
+        event.actions?.abort();
+        return;
       }
-    }),
-    qrTimeout,
-  ])
-    .then((api: API) => {
-      state.api = api;
-      state.status = "logged_in";
-      state.qrImageBase64 = null;
-      wireMessageListener(api, sessionId);
-      api.listener.start({ retryOnClose: true });
-    })
-    .catch((err: Error) => {
-      const cause = (err as Error & { cause?: unknown }).cause;
-      console.error("[zalo] QR login failed:", err.message, cause ? `\n  cause: ${cause}` : "");
-      state.status = "error";
-      state.error = err?.message ?? "Unknown error";
+      abort = event.actions?.abort;
+      if (event.type === LoginQRCallbackEventType.QRCodeGenerated) state.qrImageBase64 = event.data.image;
     });
+    const api = await Promise.race([login, cancelled]);
+    if (isActive() && !activateSession(sessionId, state, api)) throw new Error("QR session could not start");
+  } catch {
+    if (isActive()) {
+      state.status = "error";
+      state.qrImageBase64 = null;
+      state.error = "Không thể đăng nhập bằng mã QR";
+      console.error("[zalo] Không đăng nhập được bằng mã QR");
+      state.cancelQR();
+    }
+  } finally {
+    clearTimeout(timeout);
+    delete state.cancelQR;
+  }
 }
 
 export async function regenerateQRLogin(sessionId: string): Promise<void> {
@@ -172,47 +224,58 @@ export async function regenerateQRLogin(sessionId: string): Promise<void> {
 }
 
 export function resetLogin(sessionId: string): void {
-  const state = getState(sessionId);
-  if (state.api) {
-    try {
-      state.api.listener.stop();
-    } catch {
-      // ignore
-    }
+  const state = global.__zaloSessions?.get(sessionId);
+  global.__zaloSessions?.delete(sessionId);
+  clearGroupEvents(sessionId);
+  state?.cancelQR?.();
+  if (state?.session) {
+    revokeSessionSockets(state.session);
+    stopListener(state.session.api);
   }
-  state.status = "idle";
-  state.api = null;
-  state.error = null;
-  state.qrImageBase64 = null;
 }
 
-export function wireMessageListener(api: API, sessionId: string): void {
+function wireMessageListener(session: ZaloSession, sessionId: string): void {
+  const { api, accountId } = session;
+  api.listener.on("error", () => {
+    if (session.isCurrent()) console.error("[zalo] Lỗi trình nghe sự kiện");
+  });
+
   api.listener.on("message", async message => {
+    if (!session.isCurrent()) return;
     try {
-      await ingestZaloMessage(api, sessionId, message, true);
+      await ingestZaloMessage(session, message, true);
     } catch {
       console.error("[zalo] Không lưu được tin nhắn realtime");
     }
   });
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  api.listener.on("group_event", (event: any) => {
+  api.listener.on("undo", (event) => {
     try {
-      const { type, data } = event;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const base = data as any;
+      ingestZaloUndo(session, event);
+    } catch {
+      console.error("[zalo] Không lưu được sự kiện thu hồi");
+    }
+  });
 
+  api.listener.on("group_event", ({ type, data, threadId }) => {
+    if (!session.isCurrent()) return;
+    try {
+      const members = "updateMembers" in data && Array.isArray(data.updateMembers) ? data.updateMembers : [];
+      const memberNames: string[] = [];
+      const memberIds: string[] = [];
+      for (const member of members) {
+        if (member && typeof member === "object" && typeof member.id === "string" && typeof member.dName === "string") {
+          memberNames.push(member.dName);
+          memberIds.push(member.id);
+        }
+      }
       const log: GroupEventLog = {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         type: String(type),
-        groupId: base.groupId ?? "",
-        groupName: base.groupName ?? "",
-        memberNames: Array.isArray(base.updateMembers)
-          ? base.updateMembers.map((m: { dName: string }) => m.dName)
-          : [],
-        memberIds: Array.isArray(base.updateMembers)
-          ? base.updateMembers.map((m: { id: string }) => m.id)
-          : [],
+        groupId: ("groupId" in data ? data.groupId : threadId) ?? "",
+        groupName: "groupName" in data ? data.groupName : "",
+        memberNames,
+        memberIds,
         ts: Date.now(),
       };
 
@@ -220,16 +283,14 @@ export function wireMessageListener(api: API, sessionId: string): void {
       store.unshift(log);
       if (store.length > MAX_GROUP_EVENTS) store.length = MAX_GROUP_EVENTS;
 
-      const io = getSocketServer();
-      if (io) {
-        io.to(sessionId).emit("group_event", log);
-      }
-    } catch (err) {
-      console.error("[zalo] group_event wiring error:", err);
+      publishSessionEvent(session, "group_event", log);
+    } catch {
+      console.error("[zalo] Không xử lý được sự kiện nhóm");
     }
   });
 
   api.listener.on("reaction", (event) => {
+    if (!session.isCurrent()) return;
     try {
       const { data } = event;
       const threadId = event.threadId;
@@ -239,14 +300,14 @@ export function wireMessageListener(api: API, sessionId: string): void {
       const senderName = data.dName ?? senderId;
 
       if (!threadId || !icon) return;
-      const io = getSocketServer();
       for (const target of data.content.rMsg ?? []) {
-        const msgId = String(target.gMsgID);
-        updateMessageReaction(threadId, msgId, icon, senderId, senderName, api.getOwnId(), threadType);
-        io?.to(sessionId).emit("message_reaction", { threadId, threadType, msgId, icon, senderId, senderName });
+        const globalId = readProtocolId(target.gMsgID);
+        if (!globalId) continue;
+        const saved = updateMessageReaction(threadId, globalId, icon, senderId, senderName, accountId, threadType, "global");
+        if (saved) publishSessionEvent(session, "message_reaction", { threadId, threadType, msgId: saved.id, icon, senderId, senderName });
       }
-    } catch (err) {
-      console.error("[zalo] reaction wiring error:", err);
+    } catch {
+      console.error("[zalo] Không xử lý được reaction");
     }
   });
 }

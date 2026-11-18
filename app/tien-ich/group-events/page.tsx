@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
-import { io, Socket } from "socket.io-client";
+import { useEffect, useState } from "react";
+import { io } from "socket.io-client";
 import { Inbox } from "lucide-react";
 import type { GroupEventLog } from "@/lib/zalo";
 
@@ -29,21 +29,11 @@ const EVENT_TYPE_COLORS: Record<string, string> = {
   remove_admin: "bg-orange-100 text-orange-700",
 };
 
-let socket: Socket | null = null;
-
-function getSocket(): Socket {
-  if (!socket) {
-    socket = io({ path: "/api/socketio", transports: ["websocket", "polling"] });
-  }
-  return socket;
-}
-
 export default function GroupEventsPage() {
   const [events, setEvents] = useState<GroupEventLog[]>([]);
   const [isLive, setIsLive] = useState(false);
   const [filterType, setFilterType] = useState("");
   const [filterGroup, setFilterGroup] = useState("");
-  const socketRef = useRef<Socket | null>(null);
 
   // Load existing events on mount
   useEffect(() => {
@@ -57,20 +47,24 @@ export default function GroupEventsPage() {
 
   // Socket real-time
   useEffect(() => {
-    const s = getSocket();
-    socketRef.current = s;
+    const socket = io({ path: "/api/socketio", transports: ["websocket", "polling"], tryAllTransports: true, autoConnect: false });
 
     const handler = (event: GroupEventLog) => {
       setEvents((prev) => [event, ...prev]);
     };
 
-    s.on("group_event", handler);
-    s.on("connect", () => setIsLive(true));
-    s.on("disconnect", () => setIsLive(false));
-    if (s.connected) setIsLive(true);
+    const onConnect = () => setIsLive(true);
+    const onDisconnect = () => setIsLive(false);
+    socket.on("group_event", handler);
+    socket.on("connect", onConnect);
+    socket.on("disconnect", onDisconnect);
+    socket.connect();
 
     return () => {
-      s.off("group_event", handler);
+      socket.off("group_event", handler);
+      socket.off("connect", onConnect);
+      socket.off("disconnect", onDisconnect);
+      socket.disconnect();
     };
   }, []);
 
@@ -114,9 +108,9 @@ export default function GroupEventsPage() {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-2">
-        <h1 className="text-xl font-bold text-gray-800">📋 Log sự kiện nhóm</h1>
-        <div className="flex items-center gap-2">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h1 className="text-xl font-bold text-gray-800">Log sự kiện nhóm</h1>
+        <div className="flex flex-wrap items-center gap-2">
           <span
             className={`flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full ${
               isLive
@@ -134,14 +128,14 @@ export default function GroupEventsPage() {
           <button
             onClick={handleExportCsv}
             disabled={events.length === 0}
-            className="text-sm border border-gray-300 hover:bg-gray-50 disabled:opacity-40 px-3 py-1.5 rounded-lg transition-colors"
+            className="min-h-11 text-sm border border-gray-300 hover:bg-gray-50 disabled:opacity-40 px-3 py-1.5 rounded-lg transition-colors"
           >
             Export CSV
           </button>
           <button
             onClick={handleClear}
             disabled={events.length === 0}
-            className="text-sm border border-red-200 text-red-500 hover:bg-red-50 disabled:opacity-40 px-3 py-1.5 rounded-lg transition-colors"
+            className="min-h-11 text-sm border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-40 px-3 py-1.5 rounded-lg transition-colors"
           >
             Xóa log
           </button>
@@ -153,11 +147,11 @@ export default function GroupEventsPage() {
       </p>
 
       {/* Filters */}
-      <div className="flex gap-3 mb-4">
+      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap">
         <select
           value={filterType}
           onChange={(e) => setFilterType(e.target.value)}
-          className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white"
+          className="min-w-0 max-w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white"
         >
           <option value="">Tất cả loại sự kiện</option>
           {uniqueTypes.map((t) => (
@@ -171,16 +165,16 @@ export default function GroupEventsPage() {
           value={filterGroup}
           onChange={(e) => setFilterGroup(e.target.value)}
           placeholder="Lọc theo tên nhóm..."
-          className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300 flex-1 max-w-xs"
+          className="min-w-0 flex-1 text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300 sm:min-w-40 sm:max-w-xs"
         />
-        <span className="text-sm text-gray-400 self-center">
+        <span className="text-sm text-gray-600 sm:self-center">
           {filtered.length} sự kiện
         </span>
       </div>
 
       {/* Event table */}
       {filtered.length === 0 ? (
-        <div className="bg-white rounded-2xl border border-gray-100 p-12 text-center">
+        <div className="bg-white rounded-2xl border border-gray-100 p-6 text-center sm:p-12">
           <Inbox className="w-10 h-10 text-gray-300 mb-3 mx-auto" />
           <p className="text-gray-400 text-sm">
             {events.length === 0
@@ -189,8 +183,8 @@ export default function GroupEventsPage() {
           </p>
         </div>
       ) : (
-        <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden">
-          <table className="w-full text-sm">
+        <div role="region" aria-label="Bảng sự kiện nhóm" tabIndex={0} className="max-w-full overflow-x-auto rounded-2xl border border-gray-100 bg-white focus-visible:outline-2 focus-visible:outline-blue-500">
+          <table className="w-full min-w-lg text-sm">
             <thead>
               <tr className="border-b border-gray-100 text-left">
                 <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wide">
@@ -234,7 +228,7 @@ export default function GroupEventsPage() {
                       <span className="text-gray-400">{event.groupId}</span>
                     )}
                   </td>
-                  <td className="px-4 py-3 text-gray-600 max-w-[250px]">
+                  <td className="px-4 py-3 text-gray-600 max-w-[250px] [overflow-wrap:anywhere]">
                     {event.memberNames.length > 0 ? (
                       <span>{event.memberNames.join(", ")}</span>
                     ) : event.memberIds.length > 0 ? (

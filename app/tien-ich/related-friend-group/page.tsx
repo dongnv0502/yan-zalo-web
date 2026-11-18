@@ -56,14 +56,14 @@ export default function RelatedFriendGroupPage() {
       </p>
 
       {/* Search form */}
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 mb-6 max-w-lg">
-        <form onSubmit={handleLookup} className="flex gap-3">
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 sm:p-6 mb-6 max-w-lg">
+        <form onSubmit={handleLookup} className="flex flex-col gap-3 sm:flex-row">
           <input
             type="tel"
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
             placeholder="Nhập số điện thoại (VD: 0912345678)"
-            className="flex-1 border border-gray-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent"
+            className="min-w-0 flex-1 border border-gray-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent"
             required
           />
           <button
@@ -102,7 +102,7 @@ export default function RelatedFriendGroupPage() {
               <p className="font-semibold text-gray-800 truncate">
                 {user.display_name}
               </p>
-              <p className="text-sm text-gray-400">@{user.zalo_name}</p>
+              <p className="truncate text-sm text-gray-500">@{user.zalo_name}</p>
             </div>
 
             {result && (
@@ -137,7 +137,7 @@ export default function RelatedFriendGroupPage() {
                     <p className="text-sm font-medium text-gray-800 truncate">
                       {groupName}
                     </p>
-                    <p className="text-xs text-gray-400">{groupId}</p>
+                    <p className="text-xs text-gray-500 [overflow-wrap:anywhere]">{groupId}</p>
                   </div>
                 </div>
               ))}

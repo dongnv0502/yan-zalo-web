@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
+import Image from "next/image";
 import { AlertTriangle } from "lucide-react";
 
 type Status = "idle" | "loading" | "qr_generated" | "logged_in" | "error";
@@ -133,8 +134,8 @@ export default function LoginPage() {
   }, [router]);
 
   return (
-    <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-lg p-8 w-full max-w-sm text-center">
+    <div className="min-h-dvh bg-gray-50 flex items-center justify-center pt-[max(1rem,env(safe-area-inset-top))] pr-[max(1rem,env(safe-area-inset-right))] pb-[max(1rem,env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))]">
+      <div className="bg-white rounded-2xl shadow-lg p-5 sm:p-8 w-full max-w-sm text-center">
         {/* Logo / Title */}
         <div className="mb-6">
           <div className="w-16 h-16 bg-blue-500 rounded-full flex items-center justify-center mx-auto mb-3">
@@ -165,17 +166,18 @@ export default function LoginPage() {
 
         {status === "qr_generated" && (
           <div className="flex flex-col items-center gap-4">
-            <div className="border-2 border-gray-200 rounded-xl overflow-hidden">
+            <div className="aspect-square w-full max-w-56 overflow-hidden rounded-xl border-2 border-gray-200">
               {qrDataUrl ? (
-                <img
+                <Image
                   src={qrDataUrl}
                   alt="Zalo QR Code"
                   width={220}
                   height={220}
-                  className="block"
+                  className="block h-auto w-full"
+                  unoptimized
                 />
               ) : (
-                <div className="w-[220px] h-[220px] flex items-center justify-center">
+                <div className="flex h-full items-center justify-center">
                   <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
                 </div>
               )}
@@ -217,8 +219,9 @@ export default function LoginPage() {
         )}
 
         {/* Warning */}
-        <p className="text-xs text-gray-400 mt-6">
-          ⚠️ Sử dụng unofficial API — có thể vi phạm ToS của Zalo
+        <p className="mt-6 flex items-start justify-center gap-1 text-xs text-gray-600">
+          <AlertTriangle aria-hidden="true" className="w-4 h-4 shrink-0 text-amber-600" />
+          <span>Sử dụng unofficial API — có thể vi phạm ToS của Zalo</span>
         </p>
       </div>
     </div>

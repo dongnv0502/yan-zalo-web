@@ -12,14 +12,19 @@
 - Xem danh sách hội thoại (bạn bè & nhóm) theo thời gian thực qua Socket.io
   - Khi mở lại `/chat`, hội thoại đã lưu hiện trước; bạn bè và nhóm được làm mới độc lập để một danh sách chậm không chặn danh sách kia.
 - Gửi tin nhắn văn bản, emoji, sticker
+- **Tìm tin trong hội thoại** — mở “Lịch sử đã lưu” để tìm và nhảy tới tin cũ. Từ khóa chỉ dùng trên SQLite của ứng dụng, không gửi sang Zalo.
 - **Đính kèm file** — chọn file, xem preview, gửi kèm văn bản hoặc gửi riêng
 - **Ảnh và video trong chat** — xem ảnh và phát video ngay trong hội thoại; ảnh/video được lưu riêng tư trong RustFS.
 - **Thả reaction** — rê chuột vào tin nhắn → thanh emoji xuất hiện → reaction hiển thị real-time
 - **Chuyển tiếp tin nhắn** đến bất kỳ hội thoại nào
 - **Tạo bình chọn** (cho nhóm) với nhiều lựa chọn, ẩn danh, chọn nhiều đáp án
 - Tin nhắn mẫu (quick messages) — lưu sẵn, chọn 1 click
+- Trên điện thoại, thanh dưới cùng chuyển giữa **Chat** và **Tiện ích**. Khi đang xem một hội thoại, nhấn **Chat** hoặc nút quay lại để về danh sách mà không mất bản nháp của hội thoại đó. Mở menu **Thao tác tin nhắn** (`…`) để thả cảm xúc mà không cần rê chuột.
 
 ### 🛠️ Tiện ích
+
+Trên điện thoại, mở tab **Tiện ích** để xem tất cả công cụ. Trong từng công cụ, nhấn **Tất cả tiện ích** hoặc tab **Tiện ích** để quay về danh mục.
+
 | Tiện ích | Mô tả |
 |----------|-------|
 | **Tra cứu người dùng** | Nhập số điện thoại → xem thông tin Zalo → chọn **Gửi lời mời kết bạn**. Để trống lời nhắn nếu muốn dùng câu chào mặc định. |
@@ -67,6 +72,8 @@
 
 Next.js lưu tin nhắn theo tài khoản Zalo trong SQLite (`lib/messageStore.ts`). RustFS lưu tệp ảnh và video; trình duyệt tải qua API chat đã xác thực, không truy cập trực tiếp bucket. App lưu tin nhắn nhận được khi đang kết nối và lịch sử nhóm mà Zalo trả về khi mở nhóm; đây không phải công cụ đồng bộ toàn bộ lịch sử Zalo. Nếu tệp nguồn hết hạn hoặc không đọc được, tin nhắn vẫn được lưu.
 
+Thu hồi chỉ phản ánh sự kiện Zalo mà server đã nhận và xác thực; không suy ra thu hồi từ tin bị thiếu hoặc chỉ dấu chưa xác minh trong lịch sử nhóm. Khi server hoặc listener ngừng, có thể bỏ lỡ sự kiện. Tin cũ thiếu định danh nguồn đáng tin cậy không có thao tác thu hồi. Thu hồi không xóa byte đã tải, đối tượng RustFS hoặc bản sao lưu. Không phục vụ bản sao SQLite cũ như dữ liệu hiện tại nếu chưa áp lại được các dấu thu hồi phát sinh sau thời điểm sao lưu.
+
 ---
 
 ## 🚀 Cài đặt & chạy
@@ -106,6 +113,10 @@ npm run dev
 Mở [http://localhost:3000](http://localhost:3000) → đăng nhập bằng QR code Zalo.
 
 Khi chạy trực tiếp, tạo sẵn bucket riêng tư rồi đặt `RUSTFS_ENDPOINT`, `RUSTFS_BUCKET`, `RUSTFS_ACCESS_KEY_ID` và `RUSTFS_SECRET_ACCESS_KEY`. `RUSTFS_REGION` mặc định là `us-east-1`. Đặt `CHAT_DB_PATH` nếu muốn dùng đường dẫn khác `data/chat.sqlite`.
+
+Socket.io yêu cầu phiên Zalo đang hoạt động và cùng origin. Nếu reverse proxy thay `Host`, đặt `ZALO_APP_ORIGIN` thành origin HTTP(S) công khai của ứng dụng. Khi nâng cấp, thay tiến trình để phiên và kết nối cũ không được dùng lại; kiểm tra đọc `/api/chat/messages` bằng phiên kiểm thử sau khi mở SQLite đã nâng cấp (trạng thái đăng nhập không kiểm tra schema chat).
+
+Gửi trích dẫn và yêu cầu thu hồi mặc định tắt. Chỉ đặt `ZALO_CHAT_REPLY_VERIFIED=true` sau khi xác nhận phía nhận thấy quote thật và self-echo giữ đủ định danh; chỉ đặt `ZALO_CHAT_RECALL_VERIFIED=true` sau khi xác nhận self-undo đúng tin trong cả chat 1-1 và nhóm bằng tài khoản kiểm thử được phép. Phản hồi “Đang chờ xác nhận” không có nghĩa là Zalo đã thu hồi tin.
 
 ---
 

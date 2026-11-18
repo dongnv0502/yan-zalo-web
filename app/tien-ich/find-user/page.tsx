@@ -82,14 +82,14 @@ export default function FindUserPage() {
       </p>
 
       {/* Search form */}
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 mb-6 max-w-lg">
-        <form onSubmit={handleSearch} className="flex gap-3">
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 sm:p-6 mb-6 max-w-lg">
+        <form onSubmit={handleSearch} className="flex flex-col gap-3 sm:flex-row">
           <input
             type="tel"
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
             placeholder="Nhập số điện thoại (VD: 0912345678)"
-            className="flex-1 border border-gray-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent"
+            className="min-w-0 flex-1 border border-gray-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent"
             required
           />
           <button
@@ -106,7 +106,7 @@ export default function FindUserPage() {
 
       {/* Result card */}
       {user && (
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 max-w-lg">
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 sm:p-6 max-w-lg">
           <div className="flex items-center gap-4">
             {user.avatar ? (
               <Image
@@ -129,7 +129,7 @@ export default function FindUserPage() {
               <p className="font-bold text-gray-800 text-base truncate">
                 {user.display_name}
               </p>
-              <p className="text-sm text-gray-400">@{user.zalo_name}</p>
+              <p className="truncate text-sm text-gray-500">@{user.zalo_name}</p>
               {user.status && (
                 <p className="text-xs text-gray-400 mt-0.5 italic truncate">
                   &ldquo;{user.status}&rdquo;
@@ -144,10 +144,10 @@ export default function FindUserPage() {
             )}
           </div>
 
-          <div className="mt-4 pt-4 border-t border-gray-100 flex items-center gap-2">
+          <div className="mt-4 pt-4 border-t border-gray-100 flex flex-wrap items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-green-400 shrink-0" />
             <span className="text-xs text-gray-500">Có tài khoản Zalo</span>
-            <span className="text-xs text-gray-300 ml-1">· UID: {user.uid}</span>
+            <span className="text-xs text-gray-500 [overflow-wrap:anywhere]">· UID: {user.uid}</span>
           </div>
 
           {user.uid && (
@@ -167,7 +167,7 @@ export default function FindUserPage() {
               <button
                 type="submit"
                 disabled={sending || sent}
-                className="inline-flex items-center gap-2 rounded-xl bg-blue-500 px-4 py-2 text-sm font-medium text-white hover:bg-blue-600 disabled:bg-blue-300"
+                className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-blue-500 px-4 py-2 text-sm font-medium text-white hover:bg-blue-600 disabled:bg-blue-300"
               >
                 <UserRoundPlus aria-hidden="true" className="w-4 h-4" />
                 {sending ? "Đang gửi..." : "Gửi lời mời kết bạn"}

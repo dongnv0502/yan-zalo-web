@@ -2,9 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { ThreadType, type AttachmentSource } from "zca-js";
 import path from "node:path";
 import sharp from "sharp";
-import { getZaloApi } from "@/lib/zalo";
+import { getZaloSession } from "@/lib/zalo";
 import { MAX_CHAT_MEDIA_BYTES } from "@/lib/chatMedia";
 import { publishChatMessage, saveUploadedChatMedia } from "@/lib/chatIngest";
+import { readProtocolId } from "@/lib/chatProtocol";
 import type { ChatMessage } from "@/types/chat";
 
 const IMAGE_MIME_TYPES: Record<string, string> = {
@@ -14,8 +15,8 @@ const VIDEO_MIME_TYPES: Record<string, string> = { ".mp4": "video/mp4", ".webm":
 
 export async function POST(req: NextRequest) {
   const sid = req.cookies.get("zalo_sid")?.value ?? "";
-  const api = getZaloApi(sid);
-  if (!api) return NextResponse.json({ error: "Not logged in" }, { status: 401 });
+  const session = getZaloSession(sid);
+  if (!session) return NextResponse.json({ error: "Not logged in" }, { status: 401 });
   const contentLength = Number(req.headers.get("content-length") ?? 0);
   if (contentLength > MAX_CHAT_MEDIA_BYTES + 64 * 1024) {
     return NextResponse.json({ error: "Attachment is too large" }, { status: 413 });
@@ -63,26 +64,30 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const result = await api.sendMessage({ msg: textContent, attachments: [{
+    if (!session.isCurrent()) return NextResponse.json({ error: "Not logged in" }, { status: 401 });
+    const result = await session.api.sendMessage({ msg: textContent, attachments: [{
       filename: `${fileName.slice(0, -ext.length)}${ext}` as `${string}.${string}`, data: bytes, metadata,
     }] }, threadId, type);
-    const accountId = api.getOwnId();
+    if (!session.isCurrent()) return NextResponse.json({ error: "Not logged in" }, { status: 401 });
+    const { accountId } = session;
     const base = { threadId, threadType: type === ThreadType.Group ? "Group" : "User", fromId: accountId,
       fromName: "Tôi", ts: Date.now(), isSelf: true } as const;
-    if (result.message) {
-      publishChatMessage({ ...base, id: String(result.message.msgId), content: textContent }, accountId, sid);
-    }
+    const textId = readProtocolId(result.message?.msgId);
+    if (textId) publishChatMessage({ ...base, id: textId, content: textContent }, session);
     for (const attachment of result.attachment) {
+      const id = readProtocolId(attachment.msgId);
+      if (!id) continue;
       const mediaType = imageMime ? "image" : videoMime ? "video" : "file";
       const contentType = imageMime || videoMime;
-      const message: ChatMessage = { ...base, id: String(attachment.msgId), mediaType,
+      const message: ChatMessage = { ...base, id, mediaType,
         content: result.message ? fileName : textContent || fileName };
-      publishChatMessage(message, accountId, sid);
-      if (contentType && mediaType !== "file") {
-        await saveUploadedChatMedia(accountId, sid, message, bytes, contentType, mediaType);
+      const saved = publishChatMessage(message, session);
+      if (saved && contentType && mediaType !== "file") {
+        await saveUploadedChatMedia(session, saved, bytes, contentType, mediaType);
+        if (!session.isCurrent()) return NextResponse.json({ error: "Not logged in" }, { status: 401 });
       }
     }
-    return NextResponse.json({ result });
+    return NextResponse.json({ ok: true });
   } catch {
     return NextResponse.json({ error: "Failed to send attachment" }, { status: 502 });
   }

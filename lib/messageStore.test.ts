@@ -71,12 +71,12 @@ describe("getMessages", () => {
   });
 });
 
-describe("cliMsgId and reactions fields on ChatMessage", () => {
-  it("stores and retrieves a message with cliMsgId", () => {
+describe("public chat message fields", () => {
+  it("does not disclose a legacy CLI message ID to consumers", () => {
     const msg = makeMsg({ cliMsgId: "cli-abc-123" });
     storeMessage(msg, "s1");
     const result = getMessages(msg.threadId, "s1");
-    expect(result[0].cliMsgId).toBe("cli-abc-123");
+    expect(result[0]).not.toHaveProperty("cliMsgId");
   });
 
   it("stores and retrieves a message with reactions array", () => {

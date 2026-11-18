@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Image from "next/image";
 import type { UserInfo, LastOnlineResult } from "@/types/utilities";
 
 function formatLastOnline(ts: number): string {
@@ -69,7 +70,7 @@ export default function LastOnlinePage() {
   return (
     <div>
       <h1 className="text-xl font-bold text-gray-800 mb-2">
-        🕐 Tra cứu giờ online
+        Tra cứu giờ online
       </h1>
       <p className="text-sm text-gray-500 mb-6">
         Xem lần cuối người dùng online trên Zalo. Nếu người dùng đã bật ẩn
@@ -77,14 +78,14 @@ export default function LastOnlinePage() {
       </p>
 
       {/* Search form */}
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 mb-6 max-w-lg">
-        <form onSubmit={handleLookup} className="flex gap-3">
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 sm:p-6 mb-6 max-w-lg">
+        <form onSubmit={handleLookup} className="flex flex-col gap-3 sm:flex-row">
           <input
             type="tel"
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
             placeholder="Nhập số điện thoại (VD: 0912345678)"
-            className="flex-1 border border-gray-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent"
+            className="min-w-0 flex-1 border border-gray-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent"
             required
           />
           <button
@@ -101,25 +102,26 @@ export default function LastOnlinePage() {
 
       {/* Result card */}
       {user && lastOnline && (
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 max-w-lg">
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 sm:p-6 max-w-lg">
           {/* User info */}
           <div className="flex items-center gap-4 mb-5 pb-5 border-b border-gray-100">
             {user.avatar ? (
-              <img
+              <Image
                 src={user.avatar}
                 alt={user.display_name}
                 width={56}
                 height={56}
-                className="rounded-full object-cover w-14 h-14"
+                className="rounded-full object-cover w-14 h-14 shrink-0"
+                unoptimized
               />
             ) : (
-              <div className="w-14 h-14 bg-blue-100 rounded-full flex items-center justify-center">
+              <div className="w-14 h-14 shrink-0 bg-blue-100 rounded-full flex items-center justify-center">
                 <span className="text-blue-500 text-xl font-bold">
                   {user.display_name?.charAt(0)?.toUpperCase() ?? "?"}
                 </span>
               </div>
             )}
-            <div>
+            <div className="min-w-0 [overflow-wrap:anywhere]">
               <p className="font-bold text-gray-800 text-base">
                 {user.display_name}
               </p>
@@ -134,7 +136,7 @@ export default function LastOnlinePage() {
 
           {/* Last online */}
           <div className="space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="text-sm text-gray-500">Ẩn trạng thái</span>
               <span
                 className={`text-xs font-medium px-2 py-1 rounded-full ${
@@ -146,7 +148,7 @@ export default function LastOnlinePage() {
                 {lastOnline.settings?.show_online_status ? "Hiển thị" : "Đã ẩn"}
               </span>
             </div>
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="text-sm text-gray-500">Hoạt động cuối</span>
               {lastOnline.lastOnline ? (
                 <span className="text-sm font-semibold text-gray-800">
@@ -161,7 +163,7 @@ export default function LastOnlinePage() {
               )}
             </div>
             {lastOnline.lastOnline > 0 && (
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-sm text-gray-500">Thời gian chính xác</span>
                 <span className="text-xs text-gray-400">
                   {new Date(lastOnline.lastOnline * 1000).toLocaleString("vi-VN")}

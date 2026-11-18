@@ -21,6 +21,43 @@ export interface ChatMessage {
   cliMsgId?: string;
   pollId?: number;
   reactions?: MessageReaction[];
+  canReply?: boolean;
+  quote?: ChatQuotePreview;
+  canRecall?: boolean;
+  recalled?: boolean;
+}
+
+export interface ChatMessageKey {
+  threadId: string;
+  threadType: ThreadType;
+  messageId: string;
+  namespace?: "global";
+}
+
+export interface ChatQuotePreview {
+  targetId?: string;
+  targetUnavailable?: boolean;
+  text: string;
+  fromName?: string;
+}
+
+export interface ChatDraft {
+  text: string;
+  revision?: number;
+  quote?: ChatQuotePreview;
+  error?: string;
+}
+
+export interface ChatSearchResult {
+  id: string;
+  fromName: string;
+  ts: number;
+  excerpt: string;
+}
+
+export interface ChatSearchResponse {
+  results: ChatSearchResult[];
+  hasMore: boolean;
 }
 
 export interface Conversation {

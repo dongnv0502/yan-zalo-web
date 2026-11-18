@@ -4,10 +4,14 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { io } from "socket.io-client";
-import { Smile, MessageSquare, BookMarked, Plus, Paperclip, Forward, BarChart2, ArrowLeft, ImageOff, VideoOff } from "lucide-react";
-import type { ChatMessage, Conversation, StickerDetail, Tab, PickerTab, ThreadType } from "@/types/chat";
+import { Smile, MessageSquare, BookMarked, Plus, Paperclip, Forward, BarChart2, ArrowLeft, ImageOff, VideoOff, Search, X, ChevronDown, ChevronUp, Ellipsis, Reply } from "lucide-react";
+import type { ChatDraft, ChatMessage, ChatMessageKey, Conversation, StickerDetail, Tab, PickerTab, ThreadType } from "@/types/chat";
 import { useQuickMessages } from "@/lib/useQuickMessages";
 import { REACTION_ICONS, REACTION_SHORTCODES } from "@/lib/reactionIcons";
+import { findChatTextSpan } from "@/lib/chatSearchText";
+import { useSavedHistory } from "./useSavedHistory";
+import { useMessageRecall, messageKey, redactMessage, RECALLED } from "./useMessageRecall";
+import { AppHeader, MobileNav } from "../app-navigation";
 
 // Common emoji groups for the emoji tab
 const EMOJI_GROUPS = [
@@ -15,6 +19,7 @@ const EMOJI_GROUPS = [
   "🎉","❤️","🔥","✨","💯","👍","👎","🙏","💪","🤝","👏","🫶","💔","😈","👻",
   "🎵","🍕","🎮","🏆","🚀","🌸","🌈","⚡","💎","🎯",
 ];
+const EMPTY_DRAFT: ChatDraft = { text: "" };
 
 const ARCHIVED_MEDIA_PATH = /^\/api\/chat\/media\/[a-f0-9]{64}$/;
 
@@ -87,12 +92,16 @@ function addReaction(message: ChatMessage, icon: string, senderId: string, sende
 }
 
 function mergeMessage(fallback: ChatMessage, preferred: ChatMessage): ChatMessage {
+  if (preferred.recalled) return preferred;
+  if (fallback.recalled) return fallback;
   let merged: ChatMessage = {
     ...preferred,
     mediaType: preferred.mediaType ?? fallback.mediaType,
     mediaUrl: preferred.mediaUrl ?? fallback.mediaUrl,
-    cliMsgId: preferred.cliMsgId ?? fallback.cliMsgId,
     reactions: preferred.reactions ?? fallback.reactions,
+    canReply: preferred.canReply ?? fallback.canReply,
+    quote: preferred.quote ?? fallback.quote,
+    canRecall: preferred.canRecall ?? fallback.canRecall,
   };
   if (preferred.reactions) {
     for (const reaction of fallback.reactions ?? []) {
@@ -104,6 +113,25 @@ function mergeMessage(fallback: ChatMessage, preferred: ChatMessage): ChatMessag
   return merged;
 }
 
+function compareMessages(left: ChatMessage, right: ChatMessage) {
+  if (left.ts !== right.ts) return left.ts - right.ts;
+  // SQLite UTF-8 BINARY compares code points, not UTF-16 code units.
+  let offset = 0;
+  while (offset < left.id.length && offset < right.id.length) {
+    const a = left.id.codePointAt(offset)!;
+    const b = right.id.codePointAt(offset)!;
+    if (a !== b) return a - b;
+    offset += a > 0xffff ? 2 : 1;
+  }
+  return left.id.length - right.id.length;
+}
+
+function markedText(content: string, query?: string) {
+  const span = query && findChatTextSpan(content, query);
+  if (!span) return content;
+  return <>{content.slice(0, span.start)}<mark>{content.slice(span.start, span.end)}</mark>{content.slice(span.end)}</>;
+}
+
 function mergeThreadMessages(current: ChatMessage[], incoming: ChatMessage[], history = false): ChatMessage[] {
   const byId = new Map(current.map((message) => [message.id, message]));
   for (const message of incoming) {
@@ -112,7 +140,7 @@ function mergeThreadMessages(current: ChatMessage[], incoming: ChatMessage[], hi
       ? history ? mergeMessage(message, existing) : mergeMessage(existing, message)
       : message);
   }
-  return Array.from(byId.values()).sort((left, right) => left.ts - right.ts);
+  return Array.from(byId.values()).sort(compareMessages);
 }
 
 export default function ChatPage() {
@@ -175,8 +203,38 @@ function AuthenticatedChat() {
     Group: "loading",
   });
   const [active, setActive] = useState<Conversation | null>(null);
+  const saved = useSavedHistory(active);
+  const { setWindow: setSavedWindow } = saved;
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [text, setText] = useState("");
+  const [subscription, setSubscription] = useState(0);
+  const transportRevision = useRef(0);
+  const [reconnect, setReconnect] = useState(0);
+  const sessionGeneration = useRef<string | undefined>(undefined);
+  const [connectionError, setConnectionError] = useState(false);
+  const [verifiedThread, setVerifiedThread] = useState<Conversation | null>(null);
+  const [transcriptError, setTranscriptError] = useState(false);
+  const savedWindowRef = useRef(saved.window);
+  useEffect(() => { savedWindowRef.current = saved.window; }, [saved.window]);
+  const { suspend: suspendSaved, latest: resetSavedWindow } = saved;
+  const transcriptReady = subscription !== 0 && active === verifiedThread;
+  const [drafts, setDrafts] = useState<Record<string, ChatDraft>>({});
+  const draftKey = active ? conversationKey(active.id, active.type) : "";
+  const draft = drafts[draftKey] ?? EMPTY_DRAFT;
+  const { text } = draft;
+  const setText = (value: string | ((previous: string) => string)) => setDrafts((current) => {
+    const previous = current[draftKey] ?? EMPTY_DRAFT;
+    return { ...current, [draftKey]: { ...previous, revision: (previous.revision ?? 0) + 1, text: typeof value === "string" ? value : value(previous.text), error: undefined } };
+  });
+  const setDraftQuote = (message?: ChatMessage) => setDrafts((current) => ({
+    ...current, [draftKey]: { ...(current[draftKey] ?? EMPTY_DRAFT), error: undefined,
+      revision: ((current[draftKey] ?? EMPTY_DRAFT).revision ?? 0) + 1,
+      quote: message && { targetId: message.id, text: message.content, fromName: message.fromName } },
+  }));
+  const unsupportedReply = () => setDrafts((current) => ({
+    ...current, [draftKey]: { ...(current[draftKey] ?? EMPTY_DRAFT), error: "Chỉ có thể gửi văn bản khi đang trả lời." },
+  }));
+  const ackMessage = useRef<(message: ChatMessage) => void>(null);
+  const [actionMessageId, setActionMessageId] = useState<string>();
   const [sending, setSending] = useState(false);
   const [tab, setTab] = useState<Tab>("direct");
   const [search, setSearch] = useState("");
@@ -191,6 +249,7 @@ function AuthenticatedChat() {
   const templatePanelRef = useRef<HTMLDivElement>(null);
   // Updated on selection so a socket or request cannot observe the previous thread between renders.
   const activeRef = useRef<Conversation | null>(null);
+  const mergedIds = useRef(new Map<string, string>());
 
   const [templateOpen, setTemplateOpen] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
@@ -201,6 +260,7 @@ function AuthenticatedChat() {
   const { templates, loading: templatesLoading, addTemplate } = useQuickMessages();
 
   // Reaction hover state
+  const [forwardError, setForwardError] = useState("");
   const [hoveredMsgId, setHoveredMsgId] = useState<string | null>(null);
 
   // Forward message state
@@ -220,20 +280,36 @@ function AuthenticatedChat() {
   const [pollAnonymous, setPollAnonymous] = useState(false);
   const [pollCreating, setPollCreating] = useState(false);
 
+  const redactSelected = useCallback(({ threadId, threadType, messageId }: ChatMessageKey) => {
+    const id = messageKey(threadId, threadType, messageId);
+    setForwardingMessage((current) => current && messageKey(current.threadId, current.threadType, current.id) === id ? null : current);
+    const thread = conversationKey(threadId, threadType);
+    setDrafts((current) => current[thread]?.quote?.targetId === messageId
+      ? { ...current, [thread]: { ...current[thread], quote: undefined, error: "Tin được trích dẫn đã thu hồi. Tin soạn không còn trích dẫn." } } : current);
+  }, []);
+  const { recalled, onRecall, recall, pending, notice } = useMessageRecall(redactSelected);
+  const displayedMessages = (saved.window?.messages ?? messages).map((message) => redactMessage(message, recalled));
+  const quote = active && draft.quote?.targetId && recalled.has(messageKey(active.id, active.type, draft.quote.targetId)) ? undefined : draft.quote;
+  const searchResults = saved.result?.results.filter((item) => !active || !recalled.has(messageKey(active.id, active.type, item.id)));
+  const searchIndex = Math.max(0, searchResults?.findIndex((item) => item.id === saved.result?.results[saved.index]?.id) ?? 0);
+  const selectResult = (index: number) => saved.select(saved.result?.results.findIndex((item) => item.id === searchResults?.[index]?.id) ?? -1);
+
   useEffect(() => {
     const controller = new AbortController();
     const { signal } = controller;
-    const sock = io({ path: "/api/socketio", transports: ["websocket", "polling"] });
+    const sock = io({ path: "/api/socketio", transports: ["websocket", "polling"], tryAllTransports: true, autoConnect: false });
+    let connectionGeneration = 0;
+    let snapshotRequest: AbortController | undefined;
     const seenMessageKeys = new Set<string>();
     const refreshedTypes = new Set<ThreadType>();
 
-    const loadConversations = async (type?: ThreadType) => {
+    const loadConversations = async (refreshSignal: AbortSignal, type?: ThreadType) => {
       try {
         const url = type ? `/api/chat/conversations?type=${type}` : "/api/chat/conversations";
-        const response = await fetch(url, { signal });
+        const response = await fetch(url, { signal: refreshSignal });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
-        if (signal.aborted) return;
+        if (refreshSignal.aborted) return;
         if (!Array.isArray(data.conversations)) throw new Error("Invalid conversations response");
         const snapshot: Conversation[] = type
           ? data.conversations
@@ -254,7 +330,7 @@ function AuthenticatedChat() {
             const liveMessage = live?.lastMessage;
             const lastMessage = archivedMessage && liveMessage?.id === archivedMessage.id
               ? mergeMessage(liveMessage, archivedMessage)
-              : liveMessage && liveMessage.ts >= (archivedMessage?.ts ?? 0) ? liveMessage : archivedMessage;
+              : liveMessage && (!archivedMessage || compareMessages(liveMessage, archivedMessage) >= 0) ? liveMessage : archivedMessage;
             byThread.set(key, {
               ...conversation,
               lastMessage,
@@ -264,18 +340,21 @@ function AuthenticatedChat() {
           return Array.from(byThread.values()).sort((left, right) => (right.lastMessage?.ts ?? 0) - (left.lastMessage?.ts ?? 0));
         });
       } catch (error) {
-        if (signal.aborted) return;
+        if (refreshSignal.aborted) return;
         if (type) setListStatus((current) => ({ ...current, [type]: "error" }));
         console.error("Không thể tải cuộc trò chuyện:", error);
       }
     };
 
-    const onMessage = (message: ChatMessage, { mediaUpdate = false } = {}) => {
+    const onMessage = (message: ChatMessage, { mediaUpdate = false, mergedId }: { mediaUpdate?: boolean; mergedId?: string } = {}) => {
+      if (mergedId) mergedIds.current.set(messageKey(message.threadId, message.threadType, mergedId), message.id);
+      else if (mergedIds.current.has(messageKey(message.threadId, message.threadType, message.id))) return;
+      if (message.recalled) onRecall({ threadId: message.threadId, threadType: message.threadType, messageId: message.id });
       const threadIsActive = isConversation(activeRef.current, message.threadId, message.threadType);
-      const messageKey = JSON.stringify([message.threadType, message.threadId, message.id]);
-      const seen = seenMessageKeys.has(messageKey);
+      const eventKey = messageKey(message.threadId, message.threadType, message.id);
+      const seen = seenMessageKeys.has(eventKey);
       if (!seen && !mediaUpdate) {
-        seenMessageKeys.add(messageKey);
+        seenMessageKeys.add(eventKey);
         // Bound replay bookkeeping to recent events during this chat session.
         if (seenMessageKeys.size > 2000) {
           const oldest = seenMessageKeys.values().next();
@@ -298,8 +377,8 @@ function AuthenticatedChat() {
 
         const conversation = current[index];
         const previous = conversation.lastMessage;
-        const sameMessage = previous?.id === message.id;
-        const newest = !mediaUpdate && !seen && !sameMessage && (!previous || message.ts >= previous.ts);
+        const sameMessage = previous && (previous.id === message.id || previous.id === mergedId);
+        const newest = !mediaUpdate && !seen && !sameMessage && (!previous || compareMessages(message, previous) > 0);
         const unread = threadIsActive ? 0 : conversation.unread + Number(!mediaUpdate && !message.isSelf && !seen && !sameMessage);
         if (sameMessage || newest || unread !== conversation.unread) {
           const updated = {
@@ -313,7 +392,12 @@ function AuthenticatedChat() {
         return current;
       });
 
-      if (threadIsActive) setMessages((current) => mergeThreadMessages(current, [message]));
+      if (threadIsActive) {
+        const integrate = (current: ChatMessage[]) => mergeThreadMessages(mergedId ? current.filter((item) => item.id !== mergedId) : current, [message]);
+        setMessages(integrate);
+        setSavedWindow((current) => current?.messages.some((item) => item.id === message.id || item.id === mergedId)
+          ? { ...current, id: current.id === mergedId ? message.id : current.id, messages: integrate(current.messages) } : current);
+      }
     };
 
     const onReaction = ({ threadId, threadType, msgId, icon, senderId, senderName }: {
@@ -323,23 +407,82 @@ function AuthenticatedChat() {
       setMessages((current) => current.map((message) => message.id === msgId
         ? addReaction(message, icon, senderId, senderName)
         : message));
+      setSavedWindow((current) => current && { ...current, messages: current.messages.map((message) => message.id === msgId
+        ? addReaction(message, icon, senderId, senderName) : message) });
     };
 
+    ackMessage.current = onMessage;
     sock.on("message", onMessage);
     sock.on("message_reaction", onReaction);
-    void loadConversations();
-    void loadConversations("User");
-    void loadConversations("Group");
+    sock.on("message_recalled", onRecall);
+    const onDisconnect = () => {
+      transportRevision.current++;
+      connectionGeneration++;
+      snapshotRequest?.abort();
+      setSubscription(0);
+      setConnectionError(true);
+      setVerifiedThread(null);
+      setConversations([]);
+      setMessages([]);
+      seenMessageKeys.clear();
+      setActionMessageId(undefined);
+      setListStatus({ User: "loading", Group: "loading" });
+      setForwardingMessage(null);
+      setDrafts((current) => Object.fromEntries(Object.entries(current).map(([key, value]) => [key, value.quote
+        ? { ...value, quote: undefined, error: "Đã bỏ trích dẫn khi mất kết nối. Hãy chọn lại tin gốc." } : value])));
+      suspendSaved();
+    };
+    const onConnect = () => {
+      const generation = ++connectionGeneration;
+      sock.timeout(5000).emit("chat:subscribe", (error: Error | null, result?: { ok: boolean; generation?: string }) => {
+        if (signal.aborted || generation !== connectionGeneration) return;
+        if (error || !result?.ok) { onDisconnect(); sock.disconnect(); return; }
+        if (sessionGeneration.current && result.generation && sessionGeneration.current !== result.generation) {
+          onDisconnect();
+          router.replace("/login");
+          return;
+        }
+        sessionGeneration.current = result.generation;
+        snapshotRequest = new AbortController();
+        const refreshSignal = snapshotRequest.signal;
+        refreshedTypes.clear();
+        setConnectionError(false);
+        setSubscription(generation);
+        void loadConversations(refreshSignal);
+        void loadConversations(refreshSignal, "User");
+        void loadConversations(refreshSignal, "Group");
+      });
+    };
+    sock.on("connect", onConnect);
+    const onSocketDisconnect = (reason: string) => {
+      onDisconnect();
+      if (reason === "io server disconnect") router.replace("/login");
+    };
+    const onConnectError = (error: Error) => {
+      onDisconnect();
+      if (error.message === "Not logged in") router.replace("/login");
+    };
+    sock.on("disconnect", onSocketDisconnect);
+    sock.on("connect_error", onConnectError);
+    sock.connect();
     return () => {
       controller.abort();
+      snapshotRequest?.abort();
+      sock.off("connect", onConnect);
+      sock.off("disconnect", onSocketDisconnect);
+      sock.off("connect_error", onConnectError);
       sock.off("message", onMessage);
       sock.off("message_reaction", onReaction);
+      sock.off("message_recalled", onRecall);
       sock.disconnect();
+      ackMessage.current = null;
     };
-  }, []);
+  }, [onRecall, reconnect, router, setSavedWindow, suspendSaved]);
 
   useEffect(() => {
-    if (!active) return;
+    if (!active || subscription === 0) return;
+    setVerifiedThread(null);
+    setTranscriptError(false);
     const { id: threadId, type: threadType } = active;
     const controller = new AbortController();
     const { signal } = controller;
@@ -349,19 +492,47 @@ function AuthenticatedChat() {
         const response = await fetch(url, { signal });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
-        if (signal.aborted || activeRef.current !== active || !Array.isArray(data.messages)) return;
+        if (signal.aborted || activeRef.current !== active || !Array.isArray(data.messages)) return false;
+        const replacements: { id: string; mergedId: string }[] = data.replacements ?? [];
+        for (const { id, mergedId } of replacements) mergedIds.current.set(messageKey(threadId, threadType, mergedId), id);
+        const isCanonical = (message: ChatMessage) => !mergedIds.current.has(messageKey(threadId, threadType, message.id));
         const messages = (data.messages as ChatMessage[]).filter((message) =>
-          message?.threadId === threadId && message.threadType === threadType);
+          message?.threadId === threadId && message.threadType === threadType && isCanonical(message));
+        for (const item of messages) if (item.recalled) onRecall({ threadId, threadType, messageId: item.id });
         if (messages.length > 0) {
-          setMessages((current) => mergeThreadMessages(current, messages, history));
+          setMessages((current) => mergeThreadMessages(replacements.length ? current.filter(isCanonical) : current, messages, history));
         }
+        return true;
       } catch (error) {
         if (!signal.aborted) console.error(history ? "Không thể tải lịch sử nhóm:" : "Không thể tải tin nhắn:", error);
+        return false;
       }
     };
 
     const encodedThreadId = encodeURIComponent(threadId);
-    void loadMessages(`/api/chat/messages?threadId=${encodedThreadId}&threadType=${threadType}`);
+    const latestUrl = `/api/chat/messages?threadId=${encodedThreadId}&threadType=${threadType}`;
+    const restoreWindow = savedWindowRef.current;
+    const refreshTranscript = async () => {
+      const latestReady = await loadMessages(latestUrl);
+      if (signal.aborted || activeRef.current !== active) return;
+      if (!latestReady) { setTranscriptError(true); return; }
+      if (restoreWindow) {
+        try {
+          const response = await fetch(`${latestUrl}&around=${encodeURIComponent(restoreWindow.id)}`, { signal });
+          if (response.status === 404) { if (!signal.aborted) resetSavedWindow(); }
+          else {
+            if (!response.ok) throw new Error();
+            const { messages, targetId }: { messages: ChatMessage[]; targetId?: string } = await response.json();
+            if (signal.aborted || activeRef.current !== active) return;
+            for (const item of messages) if (item.recalled) onRecall({ threadId, threadType, messageId: item.id });
+            setSavedWindow((current) => current?.id === restoreWindow.id ? { ...current, id: targetId ?? current.id,
+              messages: mergeThreadMessages(messages, current.messages), scroll: signal } : current);
+          }
+        } catch { if (!signal.aborted) setTranscriptError(true); return; }
+      }
+      if (!signal.aborted && activeRef.current === active) setVerifiedThread(active);
+    };
+    void refreshTranscript();
     if (threadType === "Group") {
       void loadMessages(`/api/chat/history?groupId=${encodedThreadId}&count=50`, true);
     }
@@ -375,20 +546,24 @@ function AuthenticatedChat() {
     }).catch((error) => console.error("Không thể đánh dấu đã đọc:", error));
 
     return () => controller.abort();
-  }, [active]);
+  }, [active, subscription, onRecall, resetSavedWindow, setSavedWindow]);
 
-  // Auto-scroll
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    if (transcriptReady && !saved.window) messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, saved.window, transcriptReady]);
 
   const handleSelectConversation = (conversation: Conversation | null) => {
     if (conversation && isConversation(activeRef.current, conversation.id, conversation.type)) return;
     const selected = conversation && { ...conversation };
     activeRef.current = selected;
+    saved.reset();
     setActive(selected);
     setMessages([]);
     setHoveredMsgId(null);
+    setActionMessageId(undefined);
+    setPickerOpen(false);
+    setTemplateOpen(false);
+    setPendingFile(null);
     if (selected) {
       setConversations((current) => current.map((item) =>
         isConversation(item, selected.id, selected.type) ? { ...item, unread: 0 } : item));
@@ -397,9 +572,15 @@ function AuthenticatedChat() {
   };
 
   const handleSend = async () => {
-    if (!active || (!text.trim() && !pendingFile) || sending) return;
+    if (!active || !transcriptReady || (!text.trim() && !pendingFile) || sending) return;
+    const sentFrom = transportRevision.current;
     const payload = text.trim();
-    setText("");
+    if (quote && pendingFile) { unsupportedReply(); return; }
+    const finish = (error?: string, sent = false) => setDrafts((current) => {
+      const previous = current[draftKey] ?? EMPTY_DRAFT;
+      if (previous.revision !== draft.revision) return current;
+      return { ...current, [draftKey]: error ? { ...(sent ? EMPTY_DRAFT : previous), revision: previous.revision, error } : { text: "", revision: previous.revision } };
+    });
     setSending(true);
     try {
       if (pendingFile) {
@@ -412,11 +593,7 @@ function AuthenticatedChat() {
         form.append("threadType", active.type);
         if (payload) form.append("text", payload);
         const res = await fetch("/api/chat/attachment", { method: "POST", body: form });
-        if (!res.ok) {
-          const err = await res.json();
-          console.error("Attachment send error:", err.error);
-          if (payload) setText(payload);
-        }
+        finish(res.ok ? undefined : "Không gửi được tệp.");
       } else {
         const res = await fetch("/api/chat/send", {
           method: "POST",
@@ -425,16 +602,16 @@ function AuthenticatedChat() {
             threadId: active.id,
             threadType: active.type,
             text: payload,
+            replyToId: quote?.targetId,
           }),
         });
-        if (!res.ok) {
-          const err = await res.json();
-          console.error("Send error:", err.error);
-          setText(payload); // restore
-        }
+        const data: { message?: ChatMessage; error?: string; status?: string } = await res.json();
+        if (data.message && sentFrom === transportRevision.current) ackMessage.current?.(data.message);
+        const sent = data.status === "sent-not-saved";
+        finish(sent ? "Đã gửi, chưa lưu được lịch sử." : res.ok ? undefined : data.error || "Không gửi được tin nhắn.", sent);
       }
     } catch {
-      if (payload) setText(payload);
+      finish("Không xác định được kết quả gửi. Kiểm tra trước khi gửi lại.");
     } finally {
       setSending(false);
     }
@@ -470,7 +647,8 @@ function AuthenticatedChat() {
   };
 
   const handleSendSticker = async (sticker: StickerDetail) => {
-    if (!active || sending) return;
+    if (!active || !transcriptReady || sending) return;
+    if (quote) { unsupportedReply(); return; }
     setPickerOpen(false);
     setSending(true);
     try {
@@ -509,42 +687,44 @@ function AuthenticatedChat() {
   };
 
   const handleAddReaction = async (msg: ChatMessage, icon: string) => {
-    if (!active) return;
+    if (!active || !transcriptReady) return;
     setHoveredMsgId(null);
-    await fetch("/api/chat/reaction", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        icon,
-        messageId: msg.id,
-        cliMsgId: msg.cliMsgId ?? msg.id,
-        threadId: active.id,
-        threadType: active.type,
-      }),
-    });
+    setActionMessageId(undefined);
+    const report = (error: string) => setDrafts((current) => ({ ...current, [draftKey]: { ...(current[draftKey] ?? EMPTY_DRAFT), error } }));
+    try {
+      const response = await fetch("/api/chat/reaction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ icon, messageId: msg.id, threadId: active.id, threadType: active.type }),
+      });
+      if (!response.ok) report((await response.json()).error || "Không thêm được reaction.");
+    } catch { report("Không thêm được reaction."); }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = "";
+    if (quote) { unsupportedReply(); return; }
     setPendingFile(file);
   };
 
   const handleForwardConfirm = async (targetConv: Conversation) => {
-    if (!forwardingMessage) return;
+    if (!forwardingMessage || !transcriptReady) return;
     try {
-      await fetch("/api/chat/forward", {
+      setForwardError("");
+      const response = await fetch("/api/chat/forward", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          messageContent: forwardingMessage.content,
+          sourceThreadId: forwardingMessage.threadId,
+          sourceThreadType: forwardingMessage.threadType,
           messageId: forwardingMessage.id,
-          messageTs: forwardingMessage.ts,
           targetThreadId: targetConv.id,
           targetThreadType: targetConv.type,
         }),
       });
+      if (!response.ok) { setForwardError((await response.json()).error || "Không chuyển tiếp được."); return; }
       setForwardSuccess(true);
       setTimeout(() => {
         setForwardingMessage(null);
@@ -552,12 +732,13 @@ function AuthenticatedChat() {
         setForwardSuccess(false);
       }, 1200);
     } catch {
-      // ignore
+      setForwardError("Không xác định được kết quả chuyển tiếp.");
     }
   };
 
   const handleCreatePoll = async () => {
-    if (!active || !pollQuestion.trim()) return;
+    if (!active || !transcriptReady || !pollQuestion.trim()) return;
+    if (quote) { unsupportedReply(); return; }
     const validOptions = pollOptions.filter((o) => o.trim());
     if (validOptions.length < 2) return;
     setPollCreating(true);
@@ -643,48 +824,8 @@ function AuthenticatedChat() {
   };
 
   return (
-    <div className="h-[100dvh] flex flex-col bg-gray-50">
-      {/* Header */}
-      <header className={`bg-white border-b border-gray-200 px-3 sm:px-4 py-3 items-center justify-between shrink-0 ${active ? "hidden md:flex" : "flex"}`}>
-        <div className="flex items-center gap-2 sm:gap-4">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center">
-              <span className="text-white font-bold text-xs">Z</span>
-            </div>
-            <span className="font-bold text-gray-800">YAN Zalo</span>
-          </div>
-          <nav className="flex gap-1 items-center">
-            <a
-              href="/tien-ich"
-              className="text-sm px-3 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100"
-            >
-              Tiện ích
-            </a>
-            <span className="text-sm px-3 py-1.5 rounded-lg bg-blue-50 text-blue-600 font-medium">
-              Chat
-            </span>
-          </nav>
-        </div>
-        <div className="flex items-center gap-2">
-          <a
-            href="https://github.com/zack-the-worker/yan-zalo-web"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hidden sm:block text-gray-400 hover:text-gray-700 transition-colors"
-            title="GitHub"
-          >
-            <svg viewBox="0 0 24 24" className="w-5 h-5" fill="currentColor" aria-hidden="true">
-              <path d="M12 2C6.477 2 2 6.477 2 12c0 4.418 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.009-.868-.013-1.703-2.782.604-3.369-1.342-3.369-1.342-.454-1.155-1.11-1.463-1.11-1.463-.908-.62.069-.608.069-.608 1.004.071 1.532 1.032 1.532 1.032.892 1.529 2.341 1.087 2.91.832.091-.647.35-1.087.636-1.338-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0 1 12 6.836a9.59 9.59 0 0 1 2.504.337c1.909-1.294 2.748-1.025 2.748-1.025.546 1.377.202 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.744 0 .267.18.579.688.481C19.138 20.163 22 16.418 22 12c0-5.523-4.477-10-10-10z" />
-            </svg>
-          </a>
-          <button
-            onClick={handleLogout}
-            className="text-sm text-gray-500 hover:text-red-500 transition-colors"
-          >
-            Đăng xuất
-          </button>
-        </div>
-      </header>
+    <div className="flex h-dvh flex-col bg-gray-50 pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)]">
+      <AppHeader section="chat" onLogout={handleLogout} hideOnMobile={!!active} />
 
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Sidebar */}
@@ -699,6 +840,7 @@ function AuthenticatedChat() {
               className="w-full text-base md:text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300"
             />
           </div>
+          {!active && connectionError && <button type="button" onClick={() => { setConnectionError(false); setReconnect((current) => current + 1); }} className="m-2 self-center rounded px-3 py-2 text-sm text-blue-700">Kết nối lại</button>}
 
           {/* Tabs */}
           <div className="flex border-b border-gray-100">
@@ -706,7 +848,7 @@ function AuthenticatedChat() {
               <button
                 key={t}
                 onClick={() => setTab(t)}
-                className={`flex-1 text-sm py-2.5 font-medium transition-colors ${
+                className={`min-h-11 flex-1 text-sm font-medium transition-colors ${
                   tab === t
                     ? "text-blue-600 border-b-2 border-blue-500"
                     : "text-gray-500 hover:text-gray-700"
@@ -781,7 +923,7 @@ function AuthenticatedChat() {
                       }`}
                     >
                       {conv.lastMessage.isSelf ? "Bạn: " : ""}
-                      {conv.lastMessage.mediaType === "sticker"
+                      {conv.lastMessage.recalled || recalled.has(messageKey(conv.id, conv.type, conv.lastMessage.id)) ? RECALLED : conv.lastMessage.mediaType === "sticker"
                         ? "[Sticker]"
                         : conv.lastMessage.content || (conv.lastMessage.mediaType === "image" ? "[Hình ảnh]" : conv.lastMessage.mediaType === "video" ? "[Video]" : "")}
                     </p>
@@ -813,7 +955,7 @@ function AuthenticatedChat() {
             <>
               {/* Thread header */}
               <div className="bg-white border-b border-gray-200 px-3 sm:px-5 py-3 flex items-center gap-3 shrink-0">
-                <button type="button" onClick={() => handleSelectConversation(null)} className="md:hidden w-11 h-11 -ml-2 flex items-center justify-center rounded-xl text-gray-600" aria-label="Quay lại danh sách hội thoại">
+                <button type="button" onClick={() => handleSelectConversation(null)} className="md:hidden w-11 h-11 shrink-0 -ml-2 flex items-center justify-center rounded-xl text-gray-600" aria-label="Quay lại danh sách hội thoại">
                   <ArrowLeft className="w-5 h-5" />
                 </button>
                 {active.avatar ? (
@@ -837,18 +979,59 @@ function AuthenticatedChat() {
                     {active.type === "Group" ? "Nhóm" : "Bạn bè"} • {active.id}
                   </p>
                 </div>
+                <button type="button" aria-label="Tìm tin nhắn" aria-expanded={saved.open} disabled={!transcriptReady} onClick={() => saved.open ? saved.close() : saved.setOpen(true)} className="ml-auto grid size-11 shrink-0 place-items-center rounded-xl text-gray-600 hover:bg-gray-100 disabled:opacity-40">
+                  <Search className="w-5 h-5" />
+                </button>
               </div>
+              {saved.open && (
+                <section aria-label="Tìm trong hội thoại" className="shrink-0 space-y-2 border-b border-gray-200 bg-white px-3 py-2" onKeyDown={(event) => {
+                  if (event.key === "Escape") { event.preventDefault(); saved.close(); }
+                }}>
+                  <div className="flex items-center gap-1">
+                    <input ref={saved.searchInput} type="search" aria-label="Lịch sử đã lưu" placeholder="Lịch sử đã lưu" value={saved.query}
+                      onChange={(event) => saved.changeQuery(event.target.value)} onKeyDown={(event) => {
+                        if (event.key !== "Enter" || event.nativeEvent.isComposing || !searchResults?.length) return;
+                        event.preventDefault();
+                        const count = searchResults.length;
+                        const isCurrent = saved.window?.id === searchResults[searchIndex]?.id;
+                        selectResult(event.shiftKey ? (searchIndex + count - 1) % count : isCurrent ? (searchIndex + 1) % count : searchIndex);
+                      }} className="min-w-0 flex-1 rounded-lg border border-gray-200 px-3 py-2 text-base" />
+                    {searchResults && <span role="status" className="text-xs text-gray-600">{searchResults.length ? `${searchIndex + 1}/${searchResults.length}` : "0/0"}</span>}
+                    <button type="button" aria-label="Kết quả trước" disabled={!searchResults?.length} onClick={() => searchResults && selectResult((searchIndex + searchResults.length - 1) % searchResults.length)} className="grid size-10 shrink-0 place-items-center disabled:opacity-40"><ChevronUp className="w-5 h-5" /></button>
+                    <button type="button" aria-label="Kết quả tiếp theo" disabled={!searchResults?.length} onClick={() => searchResults && selectResult((searchIndex + 1) % searchResults.length)} className="grid size-10 shrink-0 place-items-center disabled:opacity-40"><ChevronDown className="w-5 h-5" /></button>
+                    <button type="button" aria-label="Đóng tìm kiếm" onClick={saved.close} className="grid size-10 shrink-0 place-items-center"><X className="w-5 h-5" /></button>
+                  </div>
+                  {saved.result?.hasMore && <p className="text-xs text-gray-600">100 kết quả mới nhất</p>}
+                  {saved.searchError && <p role="alert" className="text-sm text-red-700">{saved.searchError}</p>}
+                  {searchResults?.length === 0 && <p className="text-sm text-gray-500">Không tìm thấy tin nhắn.</p>}
+                  {!!searchResults?.length && <ul className="max-h-28 overflow-y-auto">
+                    {searchResults.map((item, position) => <li key={item.id}>
+                      <button type="button" aria-current={position === searchIndex || undefined} onClick={() => selectResult(position)} className="block w-full rounded-lg px-2 py-1 text-left text-sm hover:bg-gray-100">
+                        <span className="block truncate text-xs text-gray-500">{item.fromName} · {formatDate(item.ts)}</span>
+                        <span className="block truncate">{markedText(item.excerpt, saved.query.trim())}</span>
+                      </button>
+                    </li>)}
+                  </ul>}
+                </section>
+              )}
+              {saved.jumpError && <p role="alert" className="px-3 py-1 text-sm text-red-700">{saved.jumpError}</p>}
+              {saved.window && <div className="shrink-0 border-b border-gray-200 bg-white px-3 py-1 text-right"><button type="button" onClick={saved.latest} className="min-h-10 px-2 text-sm font-medium text-blue-700">Về tin mới nhất</button></div>}
+              {notice && isConversation(active, notice.threadId, notice.threadType) && <p role="status" className="px-3 py-1 text-sm text-gray-700">{notice.text}</p>}
 
               {/* Messages */}
+              {!transcriptReady && <p role="status" className="flex-1 p-4 text-center text-sm text-gray-600">{connectionError ? "Mất kết nối. Nội dung sẽ hiện sau khi đồng bộ lại." : transcriptError ? "Không thể đồng bộ lịch sử đã lưu." : "Đang đồng bộ lịch sử đã lưu…"}</p>}
+              {(connectionError || transcriptError) && <button type="button" onClick={() => { setConnectionError(false); setReconnect((current) => current + 1); }} className="m-2 self-center rounded px-3 py-2 text-sm text-blue-700">Kết nối lại</button>}
+              {transcriptReady && (
               <div className="flex-1 overflow-y-auto px-5 py-4 space-y-2">
-                {messages.length === 0 && (
+                {displayedMessages.length === 0 && (
                   <p className="text-center text-gray-400 text-sm py-8">
                     Chưa có tin nhắn nào. Bắt đầu trò chuyện!
                   </p>
                 )}
-                {messages.map((msg) => (
+                {displayedMessages.map((msg) => (
                   <div
                     key={`${active.type}:${active.id}:${msg.id}`}
+                    ref={saved.window?.id === msg.id ? saved.hit : undefined}
                     className={`flex ${msg.isSelf ? "justify-end" : "justify-start"}`}
                     onMouseEnter={() => setHoveredMsgId(msg.id)}
                     onMouseLeave={() => setHoveredMsgId(null)}
@@ -875,6 +1058,12 @@ function AuthenticatedChat() {
                               }`
                         }`}
                       >
+                        {msg.quote && (msg.quote.targetId && !msg.quote.targetUnavailable && msg.quote.text !== RECALLED ? (
+                          <button type="button" className="mb-1 block w-full max-w-full rounded border-l-2 border-current bg-black/10 px-2 py-1 text-left text-xs" onClick={() => { saved.close(); void saved.jump(msg.quote!.targetId!); }}>
+                            {msg.quote.fromName && <strong className="block truncate">{msg.quote.fromName}</strong>}
+                            <span className="block truncate">{msg.quote.text}</span>
+                          </button>
+                        ) : <p className="mb-1 truncate rounded bg-black/10 px-2 py-1 text-xs">{msg.quote.text}{msg.quote.text !== RECALLED && " · Tin gốc không có trong lịch sử đã lưu"}</p>)}
                         {msg.mediaType === "sticker" ? (
                           msg.mediaUrl ? (
                             <Image
@@ -895,7 +1084,7 @@ function AuthenticatedChat() {
                         ) : msg.mediaType === "image" || msg.mediaType === "video" ? (
                           <ArchivedMedia mediaType={msg.mediaType} mediaUrl={msg.mediaUrl} content={msg.content} />
                         ) : (
-                          msg.content
+                          markedText(msg.content, !msg.mediaType && msg.id === saved.window?.id ? saved.window.query : undefined)
                         )}
                       </div>
 
@@ -917,33 +1106,40 @@ function AuthenticatedChat() {
                       <span className="text-xs text-gray-400 mt-1 mx-1">
                         {formatTime(msg.ts)}
                       </span>
+                      {!msg.recalled && <button type="button" aria-label="Thao tác tin nhắn" aria-expanded={actionMessageId === msg.id} className="ml-1 inline-grid size-11 place-items-center rounded text-gray-600 hover:bg-gray-100 md:size-8" onClick={() => setActionMessageId(actionMessageId === msg.id ? undefined : msg.id)}><Ellipsis className="w-4 h-4" /></button>}
+                      {!msg.recalled && actionMessageId === msg.id && (
+                        <div className="flex flex-wrap gap-1 rounded border border-gray-200 bg-white px-1 text-xs">
+                          {msg.canReply && <button type="button" className="flex min-h-9 items-center gap-1 px-2" onClick={() => {
+                            setPendingFile(null);
+                            setDraftQuote(msg);
+                            setActionMessageId(undefined);
+                            inputRef.current?.focus();
+                          }}><Reply className="w-4 h-4" /> Trả lời</button>}
+                          <button type="button" className="flex min-h-9 items-center gap-1 px-2" onClick={() => {
+                            setForwardError("");
+                            setForwardingMessage(msg); setForwardSearch(""); setForwardSuccess(false); setActionMessageId(undefined);
+                          }}><Forward className="w-4 h-4" /> Chuyển tiếp</button>
+                          {msg.canRecall && <button type="button" disabled={pending.has(messageKey(msg.threadId, msg.threadType, msg.id))} className="flex min-h-9 items-center gap-1 px-2 text-red-700 disabled:opacity-50" onClick={() => { setActionMessageId(undefined); void recall(msg); }}>Thu hồi</button>}
+                        </div>
+                      )}
                     </div>
 
-                    {/* Hover action bar — reaction picker + forward */}
-                    {hoveredMsgId === msg.id && (
+                    {!msg.recalled && (actionMessageId === msg.id || hoveredMsgId === msg.id) && (
                       <div
-                        className={`absolute top-0 flex items-center gap-1 bg-white border border-gray-200 shadow-lg rounded-full px-2 py-1 z-10 ${
-                          msg.isSelf ? "right-full mr-2" : "left-full ml-2"
-                        }`}
+                        className={actionMessageId === msg.id
+                          ? "mt-1 flex flex-wrap rounded-xl border border-gray-200 bg-white p-1"
+                          : `absolute top-0 z-10 hidden items-center gap-1 rounded-full border border-gray-200 bg-white px-2 py-1 shadow-lg pointer-fine:md:flex ${msg.isSelf ? "right-full mr-2" : "left-full ml-2"}`}
                       >
                         {REACTION_SHORTCODES.map((code) => (
                           <button
                             key={code}
+                            aria-label={`Thả cảm xúc ${REACTION_ICONS[code]}`}
                             onClick={() => handleAddReaction(msg, code)}
-                            className="text-base hover:scale-125 transition-transform leading-none"
-                            title={code}
+                            className={actionMessageId === msg.id ? "grid size-11 place-items-center rounded-lg hover:bg-gray-100" : "text-base leading-none hover:scale-125"}
                           >
                             {REACTION_ICONS[code]}
                           </button>
                         ))}
-                        <div className="w-px h-4 bg-gray-200 mx-0.5" />
-                        <button
-                          onClick={() => { setForwardingMessage(msg); setForwardSearch(""); setForwardSuccess(false); }}
-                          className="text-gray-400 hover:text-blue-500 transition-colors"
-                          title="Chuyển tiếp"
-                        >
-                          <Forward className="w-3.5 h-3.5" />
-                        </button>
                       </div>
                     )}
                     </div>
@@ -951,9 +1147,15 @@ function AuthenticatedChat() {
                 ))}
                 <div ref={messagesEndRef} />
               </div>
+              )}
 
               {/* Input */}
-              <div className="relative bg-white border-t border-gray-200 px-2 sm:px-4 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:py-3 flex flex-wrap items-end gap-1 sm:gap-2 shrink-0">
+              <div className="relative bg-white border-t border-gray-200 px-2 sm:px-4 py-2 sm:py-3 flex flex-wrap items-end gap-1 sm:gap-2 shrink-0">
+                {quote && <div className="flex w-full min-w-0 items-center gap-2 rounded-lg border-l-2 border-blue-500 bg-blue-50 px-2 text-sm text-gray-700">
+                  <p className="min-w-0 flex-1 truncate">Trả lời {quote.fromName}: {quote.text}</p>
+                  <button type="button" aria-label="Bỏ trích dẫn" className="grid size-10 shrink-0 place-items-center" onClick={() => { setDraftQuote(); inputRef.current?.focus(); }}><X className="w-4 h-4" /></button>
+                </div>}
+                {draft.error && <p role="alert" className="w-full text-sm text-red-700">{draft.error}</p>}
                 {/* Hidden file input */}
                 <input
                   ref={fileInputRef}
@@ -981,7 +1183,7 @@ function AuthenticatedChat() {
                   <BarChart2 className="w-5 h-5" />
                 </button>
                 {/* Quick message template panel */}
-                <div className="relative flex-shrink-0">
+                <div className="shrink-0 md:relative">
                   <button
                     onClick={() => {
                       setPickerOpen(false);
@@ -1000,7 +1202,7 @@ function AuthenticatedChat() {
                   {templateOpen && (
                     <div
                       ref={templatePanelRef}
-                      className="fixed bottom-28 left-2 right-2 sm:absolute sm:bottom-12 sm:left-0 sm:right-auto sm:w-80 bg-white border border-gray-200 rounded-2xl shadow-2xl overflow-hidden z-50"
+                      className="absolute inset-x-2 bottom-full z-50 max-h-[min(45dvh,24rem)] overflow-y-auto rounded-2xl border border-gray-200 bg-white shadow-2xl md:right-auto md:left-0 md:bottom-12 md:w-80"
                     >
                       {/* Panel header */}
                       <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100">
@@ -1076,7 +1278,7 @@ function AuthenticatedChat() {
                 </div>
 
                 {/* Emoji / Sticker picker */}
-                <div className="relative flex-shrink-0" ref={pickerRef}>
+                <div className="shrink-0 md:relative" ref={pickerRef}>
                   <button
                     onClick={() => {
                       setTemplateOpen(false);
@@ -1100,7 +1302,7 @@ function AuthenticatedChat() {
                   </button>
 
                   {pickerOpen && (
-                    <div className="fixed bottom-28 left-2 right-2 sm:absolute sm:bottom-12 sm:left-0 sm:right-auto sm:w-80 bg-white border border-gray-200 rounded-2xl shadow-2xl overflow-hidden z-50">
+                    <div className="absolute inset-x-2 bottom-full z-50 max-h-[min(45dvh,24rem)] overflow-y-auto rounded-2xl border border-gray-200 bg-white shadow-2xl md:right-auto md:left-0 md:bottom-12 md:w-80">
                       {/* Picker tabs */}
                       <div className="flex border-b border-gray-100">
                         <button
@@ -1111,7 +1313,7 @@ function AuthenticatedChat() {
                               : "text-gray-500 hover:text-gray-700"
                           }`}
                         >
-                          😀 Emoji
+                          Emoji
                         </button>
                         <button
                           onClick={() => setPickerTab("sticker")}
@@ -1121,18 +1323,18 @@ function AuthenticatedChat() {
                               : "text-gray-500 hover:text-gray-700"
                           }`}
                         >
-                          🖼 Sticker
+                          Sticker
                         </button>
                       </div>
 
                       {/* Emoji tab */}
                       {pickerTab === "emoji" && (
-                        <div className="p-3 grid grid-cols-8 gap-1 max-h-56 overflow-y-auto">
+                        <div className="grid max-h-56 grid-cols-6 gap-1 overflow-y-auto p-3 sm:grid-cols-8">
                           {EMOJI_GROUPS.map((emoji) => (
                             <button
                               key={emoji}
                               onClick={() => handleSendEmoji(emoji)}
-                              className="text-2xl w-9 h-9 flex items-center justify-center rounded-lg hover:bg-gray-100 transition-colors"
+                              className="grid min-h-9 min-w-0 place-items-center rounded-lg text-2xl transition-colors hover:bg-gray-100"
                             >
                               {emoji}
                             </button>
@@ -1207,18 +1409,18 @@ function AuthenticatedChat() {
                   )}
                   <textarea
                     ref={inputRef}
+                    aria-label="Nội dung tin nhắn"
                     value={text}
                     onChange={(e) => setText(e.target.value)}
                     onKeyDown={handleKeyDown}
                     placeholder="Nhập tin nhắn... (Enter để gửi, Shift+Enter xuống dòng)"
                     rows={1}
-                    className="flex-1 resize-none text-base sm:text-sm border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-300 max-h-32 overflow-y-auto"
-                    style={{ minHeight: "44px" }}
+                    className="min-h-11 flex-1 resize-none text-base sm:text-sm border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-300 max-h-32 overflow-y-auto"
                   />
                 </div>
                 <button
                   onClick={handleSend}
-                  disabled={(!text.trim() && !pendingFile) || sending}
+                  disabled={!transcriptReady || (!text.trim() && !pendingFile) || sending}
                   className="ml-auto sm:ml-0 bg-blue-500 hover:bg-blue-600 disabled:bg-blue-300 text-white px-5 py-3 rounded-xl text-sm font-medium transition-colors shrink-0"
                 >
                   {sending ? "..." : "Gửi"}
@@ -1228,14 +1430,15 @@ function AuthenticatedChat() {
           )}
         </main>
       </div>
+      <MobileNav section="chat" onChatList={active ? () => handleSelectConversation(null) : undefined} />
 
       {/* Forward Message Modal */}
-      {forwardingMessage && (
+      {forwardingMessage && !recalled.has(messageKey(forwardingMessage.threadId, forwardingMessage.threadType, forwardingMessage.id)) && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setForwardingMessage(null)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-96 max-h-[80dvh] flex flex-col" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
               <h3 className="font-semibold text-gray-800">Chuyển tiếp tin nhắn</h3>
-              <button onClick={() => setForwardingMessage(null)} className="text-gray-400 hover:text-gray-600">✕</button>
+              <button type="button" aria-label="Đóng chuyển tiếp" onClick={() => setForwardingMessage(null)} className="grid size-11 shrink-0 place-items-center rounded-lg text-gray-500 hover:bg-gray-100"><X className="w-5 h-5" /></button>
             </div>
             {forwardSuccess ? (
               <div className="flex-1 flex items-center justify-center p-6">
@@ -1246,6 +1449,7 @@ function AuthenticatedChat() {
                 <div className="px-4 py-2 border-b border-gray-100 bg-gray-50">
                   <p className="text-xs text-gray-500 truncate">"{forwardingMessage?.content}"</p>
                 </div>
+                {forwardError && <p role="alert" className="px-4 py-2 text-sm text-red-700">{forwardError}</p>}
                 <div className="px-4 py-2 border-b border-gray-100">
                   <input
                     type="text"
@@ -1287,7 +1491,7 @@ function AuthenticatedChat() {
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-96 max-h-[90dvh] flex flex-col" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
               <h3 className="font-semibold text-gray-800">Tạo bình chọn</h3>
-              <button onClick={() => setShowPollModal(false)} className="text-gray-400 hover:text-gray-600">✕</button>
+              <button type="button" aria-label="Đóng tạo bình chọn" onClick={() => setShowPollModal(false)} className="grid size-11 shrink-0 place-items-center rounded-lg text-gray-500 hover:bg-gray-100"><X className="w-5 h-5" /></button>
             </div>
             <div className="flex-1 overflow-y-auto p-4 space-y-3">
               <div>
@@ -1311,10 +1515,10 @@ function AuthenticatedChat() {
                         value={opt}
                         onChange={(e) => { const next = [...pollOptions]; next[i] = e.target.value; setPollOptions(next); }}
                         placeholder={`Lựa chọn ${i + 1}`}
-                        className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300"
+                        className="min-w-0 flex-1 text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300"
                       />
                       {pollOptions.length > 2 && (
-                        <button onClick={() => setPollOptions(pollOptions.filter((_, j) => j !== i))} className="text-gray-400 hover:text-red-500 text-sm px-1">✕</button>
+                        <button type="button" aria-label={`Xóa lựa chọn ${i + 1}`} onClick={() => setPollOptions(pollOptions.filter((_, j) => j !== i))} className="grid size-11 shrink-0 place-items-center rounded-lg text-gray-500 hover:bg-red-50 hover:text-red-600"><X className="w-4 h-4" /></button>
                       )}
                     </div>
                   ))}
