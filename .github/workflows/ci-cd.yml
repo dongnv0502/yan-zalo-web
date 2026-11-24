@@ -80,10 +80,10 @@ jobs:
           IMAGE_DIGEST: ${{ needs.publish.outputs.digest }}
         run: |
           set -euo pipefail
-          file=apps/yan-zalo-web/compose.yml
+          file=k8s/apps/yan-zalo-web/deployment.yaml
           image=ghcr.io/dongnv0502/yan-zalo-web
           [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
-          pattern="^[[:space:]]+image: ${image//./\\.}@sha256:[a-f0-9]{64}$"
+          pattern="^([[:space:]]+image: ${image//./\\.})@sha256:[a-f0-9]{64}$"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
@@ -99,7 +99,8 @@ jobs:
               echo 'Homelab must first be configured for the digest-pinned YAN Zalo image.' >&2
               exit 1
             fi
-            sed -i -E "s#${pattern}#    image: ${image}@${IMAGE_DIGEST}#" "$file"
+            # Keep the manifest's own indentation; only the digest changes.
+            sed -i -E "s#${pattern}#\\1@${IMAGE_DIGEST}#" "$file"
             if git diff --quiet -- "$file"; then
               exit 0
             fi
